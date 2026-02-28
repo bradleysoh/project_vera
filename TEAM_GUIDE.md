@@ -44,17 +44,15 @@ proj_vera/
 
 The system **automatically discovers** domain agents at startup:
 
-1. Scans `agents_logic/` for `*_agents/` subfolders
-2. Imports each `.py` file's `run()` function
-3. Registers them as LangGraph nodes: `{domain}_{role}`
+1. Scans `agents_logic/` for `*_agents/` subfolders.
+2. Imports each `.py` file; looks for a `run()` function.
+3. Automatically maps agents to roles based on convention:
+   - `db_agent.py` → `{domain}_db_query`
+   - `official_docs_agent.py` → `{domain}_official`
+   - `informal_docs_agent.py` → `{domain}_informal`
+   - `discrepancy_agent.py` → `{domain}_discrepancy`
 
-```
-semiconductor_agents/tech_spec_agent.py  → node: semiconductor_retrieve_specs
-semiconductor_agents/compliance_agent.py → node: semiconductor_retrieve_compliance
-medical_agents/tech_spec_agent.py        → node: medical_retrieve_specs
-```
-
-**To add a new domain**, just create a new `{domain}_agents/` folder with the 3 required agents!
+**To add a new domain**, simply create a new folder and a `domain_config.py` file!
 
 ---
 
@@ -95,18 +93,18 @@ Example: A semiconductor engineer asking "What are the FDA clinical trial requir
 
 ```bash
 # 1. Create the domain agent folder
-mkdir agents_logic/automotive_agents/
-touch agents_logic/automotive_agents/__init__.py
+mkdir agents_logic/medical_agents/
+touch agents_logic/medical_agents/__init__.py
 
-# 2. Copy agents from an existing domain
-cp agents_logic/semiconductor_agents/tech_spec_agent.py agents_logic/automotive_agents/
-cp agents_logic/semiconductor_agents/compliance_agent.py agents_logic/automotive_agents/
-cp agents_logic/semiconductor_agents/discrepancy_agent.py agents_logic/automotive_agents/
+# 2. Add domain_config.py (CRITICAL)
+# Define your domain's keywords, aliases, and metadata schema here.
+# This powers the Surgical Router.
 
-# 3. Edit each agent — change @vera_agent name and source_filter
-# 4. Add data to source_documents/automotive/
-# 5. Re-run ingestion and test
-python ingestion.py && python app.py
+# 3. Implement the 4 Core Agents
+# db_agent.py, official_docs_agent.py, informal_docs_agent.py, discrepancy_agent.py
+
+# 4. Add data to source_documents/medical/
+# Place .txt files for RAG and .db files for SQL.
 ```
 
 The domain will be **auto-discovered** — no code changes needed in `app.py`, `router_agent.py`, or `streamlit_app.py`.
@@ -136,38 +134,35 @@ The domain will be **auto-discovered** — no code changes needed in `app.py`, `
 
 ---
 
-## 📋 Template C: Agent Code
+## 📋 Template C: Agent Code (Contract)
 
-### Required contract:
+All agents MUST use the `@vera_agent` decorator and accept `GraphState`.
 
 ```python
 from shared.graph_state import GraphState
 from shared.agent_base import vera_agent
-from shared.config import retrieve_with_rbac
+from shared.advanced_rag import extract_structured_facts
 
-@vera_agent("My Domain Agent Name")
+@vera_agent("Official Agent")
 def run(state: GraphState) -> dict:
-    question = state["question"]
-    user_role = state["user_role"]
-    user_domain = state.get("user_domain", "my_domain")
-
-    documents, metadata_log = retrieve_with_rbac(
-        query=question,
-        user_role=user_role,
-        user_domain=user_domain,       # Domain isolation filter
-        source_filter=["datasheet"],    # Source type filter
-        k=4,
+    # High-precision retrieval example
+    facts = extract_structured_facts(
+        state["question"],
+        entity=state["target_entity"],
+        attribute=state["target_attribute"],
+        source_filter=["datasheet"]
     )
-    return {"documents": documents, "metadata_log": metadata_log}
+    return {"extracted_facts": facts}
 ```
 
-### Each domain needs 3 agents:
+### The 4 Required Agents per Domain:
 
-| Agent File | Role | Node Name |
-|-----------|------|-----------|
-| `tech_spec_agent.py` | Retrieval (specs) | `{domain}_retrieve_specs` |
-| `compliance_agent.py` | Retrieval (SOPs) | `{domain}_retrieve_compliance` |
-| `discrepancy_agent.py` | Cross-agent comparison | `{domain}_check_discrepancy` |
+| Agent File | Role | Goal |
+| :--- | :--- | :--- |
+| `db_agent.py` | SQL Expert | Natural language to SQL querying. |
+| `official_docs_agent.py` | Librarian | Precise spec extraction from official docs. |
+| `informal_docs_agent.py` | Detective | Context research in emails/memos. |
+| `discrepancy_agent.py` | Auditor | Conflict detection across all facts. |
 
 ---
 

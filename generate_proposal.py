@@ -222,12 +222,13 @@ def create_proposal():
         'The core application implements a LangGraph state machine with specialized agents:'
     )
     for item in [
-        'Router Agent: Classifies query intent and performs RBAC security checks',
-        'Technical Spec Agent: Retrieves and analyzes product datasheet information',
-        'Compliance Agent: Searches SOPs and internal emails for process information',
+        'Router Agent: Performs LLM-based NER and surgical routing to domain subchains',
+        'DB Agent: Executes natural language to SQL queries on domain databases',
+        'Official Docs Agent: Extracts high-precision facts from datasheets and manuals',
+        'Informal Docs Agent: Researches engineering emails and informal memos',
         'Response Generator: Synthesizes comprehensive answers with source citations',
-        'Case Agent: Detects and reports discrepancies across document sources',
-        'Escalation Handler: Manages unauthorized access attempts',
+        'Discrepancy Agent: Performs final audit and cross-source conflict detection',
+        'Escalation Handler: Manages unauthorized access and out-of-domain queries',
     ]:
         doc.add_paragraph(item, style='List Bullet')
     
@@ -256,11 +257,11 @@ def create_proposal():
     
     flow_data = [
         ('1', 'Entry Point', 'User submits query with role (senior/junior)'),
-        ('2', 'Router Agent', 'Classifies intent + security check'),
-        ('3a', 'Tech Spec Agent', 'Retrieves from datasheets (if technical)'),
-        ('3b', 'Compliance Agent', 'Retrieves from SOPs + emails (if compliance)'),
-        ('3c', 'Escalation', 'Handles unauthorized access (if flagged)'),
-        ('4', 'Generator + Case Agent', 'Synthesizes response + checks discrepancies'),
+        ('2', 'Router Agent', 'LLM-NER (Entity/Attr) + Surgical Routing'),
+        ('3a', 'DB Agent', 'SQL Querying (Read-only) if db_query target'),
+        ('3b', 'Official Agent', 'Spec Extraction if spec_retrieval target'),
+        ('3c', 'Full Retrieval', 'Cross-referencing all sources if cross_reference'),
+        ('4', 'Generator + Auditor', 'Response synthesis + Discrepancy audit'),
     ]
     for i, (stage, component, desc) in enumerate(flow_data):
         table.rows[i+1].cells[0].text = stage
@@ -297,12 +298,12 @@ def create_proposal():
                 run.bold = True
     
     agents_data = [
-        ('Router', 'route_query', 'Question + User Role', 'Route + Security Flag'),
-        ('Tech Spec', 'retrieve_specs', 'Question', 'Datasheet Documents'),
-        ('Compliance', 'retrieve_compliance', 'Question', 'SOP + Email Documents'),
-        ('Generator', 'generate_response', 'Documents + Question', 'LLM Response'),
-        ('Case Agent', 'check_discrepancy', 'Documents + Response', 'Discrepancy Report'),
-        ('Escalation', 'escalate', 'Security Flag', 'Escalation Notice'),
+        ('Router', 'route_query', 'Question + Role', 'Route + NER + Security Flag'),
+        ('DB Agent', '{domain}_db_query', 'Question', 'SQL Results as Structured Facts'),
+        ('Official Docs', '{domain}_official', 'Question + Entity', 'Precise Specifications'),
+        ('Informal Docs', '{domain}_informal', 'Question + Entity', 'Email-based Decisions'),
+        ('Generator', 'generate_response', 'Extracted Facts', 'LLM Report'),
+        ('Discrepancy', '{domain}_discrepancy', 'All Facts + Report', 'Audit Verdict'),
     ]
     for i, (agent, node, inp, out) in enumerate(agents_data):
         table.rows[i+1].cells[0].text = agent

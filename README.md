@@ -68,36 +68,46 @@ In many industries, **official specifications** (datasheets, manuals) often beco
 graph TD
     A["🧑 User Query + Role"] --> B["🔀 Router Agent"]
     
-    B -->|"Technical Intent"| C["📊 Technical Spec Agent"]
-    B -->|"Compliance Intent"| D["📋 Compliance Agent"]
+    B -->|"Surgical Route: db_query"| C1["🗄️ DB Agent"]
+    B -->|"Surgical Route: spec_retrieval"| C2["📊 Official Docs Agent"]
+    B -->|"Surgical Route: cross_reference"| C3["🧠 Full Chain (DB+Official+Informal)"]
     B -->|"🚨 Security Flag"| E["⚠️ Human Escalation"]
     
-    C -->|"Retrieves from Datasheets"| F["🤖 Response Generator"]
-    D -->|"Retrieves from SOPs + Emails + DB + Docs"| F
+    C1 --> D["🧩 Structured Facts"]
+    C2 --> D
+    C3 --> D
     
-    F --> G["🔍 Discrepancy Detector"]
+    D --> F["🤖 Response Generator"]
+    F --> G["🔍 Discrepancy Agent"]
     G -->|"Report Generated"| H["📤 Final Response"]
     E -->|"Detailed Escalation Summary"| H
 
-    subgraph "ChromaDB Vector Store"
-        I["📄 Datasheets\n(public)"]
-        J["📧 Emails\n(internal/confidential)"]
-        K["📋 SOPs\n(public/internal)"]
-        L["🗄️ DB Info\n(public/confidential)"]
-        M["📑 Versioned Docs\n(public/confidential)"]
+    subgraph "Knowledge Sources"
+        I["📄 Official Specs\n(ChromaDB)"]
+        J["📧 Informal Emails\n(ChromaDB)"]
+        K["🗄️ Production DB\n(SQLite)"]
+        L["📋 SOPs\n(ChromaDB)"]
     end
 
-    C -.->|"RBAC Filter"| I
-    D -.->|"RBAC Filter"| J
-    D -.->|"RBAC Filter"| K
-    D -.->|"RBAC Filter"| L
-    D -.->|"RBAC Filter"| M
+    C1 -.->|"SQL Query"| K
+    C2 -.->|"Semantic Search"| I
+    C3 -.->|"Full RAG"| I & J & K & L
 
     style E fill:#ff6b6b,stroke:#c92a2a,color:#fff
     style B fill:#4dabf7,stroke:#1864ab,color:#fff
     style G fill:#ffd43b,stroke:#f59f00,color:#333
     style H fill:#69db7c,stroke:#2b8a3e,color:#333
 ```
+
+### Data Flow (Surgical Routing)
+
+1. **User** submits a query with their role (Senior/Junior).
+2. **Router Agent** performs **LLM-based NER** to extract entities/attributes and classifies intent into fine-grained categories (`db_query`, `spec_retrieval`, `cross_reference`).
+3. **Retrieval Agents** perform **Structured Fact Extraction**:
+    *   **DB Agent** translates NL to SQL and queries SQLite databases.
+    *   **Official/Informal Agents** use high-precision RAG (filtering by entity) to extract facts into Pydantic models.
+4. **Generator** synthesizes a response using the extracted facts, leading with a **Discrepancy Summary** if conflicts are found.
+5. **Discrepancy Agent** performs a final audit, comparing the generated response against raw documents to ensure no hallucinations.
 
 ### Data Flow
 
@@ -112,14 +122,26 @@ graph TD
 
 ## Agent Descriptions
 
-| Agent | LangGraph Node | Role | Input → Output |
-|-------|---------------|------|-----------------|
-| **🔀 Router** | `route_query` | Classifies query intent (technical/compliance) using keyword matching and performs RBAC security checks | Question → Route decision + security flag |
-| **📊 Tech Spec Agent** | `retrieve_specs` | Retrieves from product datasheets with RBAC filtering | Question → Relevant datasheet chunks |
-| **📋 Compliance Agent** | `retrieve_compliance` | Retrieves from SOPs, emails, DB info, and versioned documents to find formal procedures, informal decisions, database records, and specification changes | Question → SOP + Email + DB + Document chunks |
-| **🤖 Response Generator** | `generate_response` | Synthesizes a comprehensive answer citing all sources | Documents → Natural language response |
-| **🔍 Case Agent** | `check_discrepancy` | Detects conflicts between datasheets, emails, DB records, and document versions; generates discrepancy reports | Documents → Discrepancy report (if any) |
-| **⚠️ Escalation** | `escalate` | Handles unauthorized access with detailed context summaries of discrepancies/errors/outdated info | Security flag → Detailed escalation notice |
+| Agent | LangGraph Node | Role |
+| :--- | :--- | :--- |
+| **🔀 Router** | `route_query` | Orchestrator: performs NER, security checks, and surgical routing to specific domain subchains. |
+| **🗄️ DB Agent** | `{domain}_db_query` | SQL Specialist: inspects schemas and executes read-only queries on domain SQLite databases. |
+| **📊 Official Docs** | `{domain}_official` | Fact Extractor: retrieves high-precision specs from datasheets and manuals via entity-filtered RAG. |
+| **📧 Informal Docs**| `{domain}_informal` | Context Researcher: searches engineering emails and design memos for undocumented changes. |
+| **🔍 Discrepancy** | `{domain}_discrepancy` | Auditor: cross-references all facts and identifies conflicts (e.g., DB says 3.3V, Datasheet says 5.0V). |
+| **🤖 Response Gen** | `generate_response` | Compiler: formats structured facts into a final report with clear source citations. |
+| **⚠️ Escalation** | `escalate` | Security: handles unauthorized access or out-of-domain queries with detailed context. |
+
+---
+
+## Industrial Genericity
+
+VERA is designed for **"Plug-and-Play" multi-industry deployment**. The core system (`shared/`) is 100% domain-agnostic. To add a new industry (e.g., Medical), simply:
+1. Create `agents_logic/medical_agents/`
+2. Define domain-specific keywords in `domain_config.py`
+3. Add data to `source_documents/medical/`
+
+The system will **automatically discover** the new agents and route "Medical" queries to them without any changes to the core code.
 
 ---
 
@@ -293,27 +315,28 @@ This runs 5 automated test scenarios demonstrating:
 
 ```
 proj_vera/
-├── shared/                 # ⚙️ Shared infrastructure (config, state, loader)
-│   ├── config.py           # LLM, VectorStore, RBAC, retry logic
+├── shared/                 # ⚙️ Shared infrastructure (100% Generic)
+│   ├── advanced_rag.py     # High-precision retrieval & fact extraction
+│   ├── config.py           # LLM, VectorStore, RBAC, factory methods
+│   ├── db_utils.py         # Dynamic SQLite discovery & querying
 │   ├── graph_state.py      # GraphState TypedDict (state schema)
-│   ├── agent_base.py       # @vera_agent decorator
-│   └── dynamic_loader.py   # Auto-discovers domain agent subfolders
-├── agents_logic/           # 🤖 Agent modules (shared + per-domain)
-│   ├── router_agent.py     # Intent + domain routing (keyword-based)
-│   ├── response_agent.py   # LLM response generation
-│   ├── escalation_agent.py # Security + out-of-domain escalation
-│   ├── semiconductor_agents/  # Domain: semiconductor
-│   └── medical_agents/        # Domain: medical
+│   └── dynamic_loader.py   # Auto-discovers domain agents & configs
+├── agents_logic/           # 🤖 Agent modules
+│   ├── router_agent.py     # LLM-NER & Surgical Routing
+│   ├── response_agent.py   # Report compiler
+│   ├── escalation_agent.py # Security & domain-mismatch handler
+│   └── semiconductor_agents/ # Domain: semiconductor (example)
+│       ├── db_agent.py              # SQL query capability
+│       ├── official_docs_agent.py   # Datasheet retrieval
+│       ├── informal_docs_agent.py   # Email/Memo research
+│       ├── discrepancy_agent.py     # Audit logic
+│       └── domain_config.py         # Domain keywords & heuristics
 ├── source_documents/       # 📁 Source data per domain
-├── streamlit_app.py        # 🖥️ Interactive Streamlit chat interface
-├── app.py                  # Main LangGraph multi-agent application
-├── ingestion.py            # Data ingestion pipeline (mock data → ChromaDB)
-├── environment.yml         # Conda environment definition
-├── requirements.txt        # pip dependencies (alternative)
-├── TEAM_GUIDE.md           # Developer guide for team members
-├── README.md               # This file
-├── .env                    # Environment variables (backend + API keys)
-└── chroma_db/              # ChromaDB persistence directory (auto-generated)
+│   └── semiconductor/      # .txt docs and .db files
+├── streamlit_app.py        # 🖥️ Interactive Web UI
+├── app.py                  # Main LangGraph orchestrator
+├── ingestion.py            # Data ingestion pipeline (ChromaDB)
+└── output/                 # 📂 System-generated logs (domain-specific)
 ```
 
 ---
