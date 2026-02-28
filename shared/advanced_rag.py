@@ -202,10 +202,8 @@ def _post_filter_by_entity(
             unmatched.append(doc)
 
     # If entity matched docs exist, return ONLY those
-    if matched:
-        return matched
-    # Fallback: keep top 2 unmatched docs for general context
-    return unmatched[:2]
+    # Otherwise, return an empty list to prevent irrelevant context leakage
+    return matched
 
 
 def _compute_confidence(
@@ -321,6 +319,10 @@ def query_understand_and_retrieve(
 # ---------------------------------------------------------------------------
 # Stage 3: Structured Fact Extraction (Extract-then-Evaluate)
 # ---------------------------------------------------------------------------
+# Uses LangChain's `.with_structured_output(FactCollection)` for guaranteed
+# Pydantic-valid output.  Falls back to text+regex if the model does not
+# support tool-calling.
+# ---------------------------------------------------------------------------
 
 _FACT_EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
     ("human", (
@@ -328,27 +330,41 @@ _FACT_EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
         "documents below.\n\n"
         "TARGET ENTITY: {target_entity}\n"
         "TARGET ATTRIBUTE: {target_attribute}\n\n"
-        "For each document chunk, extract facts as JSON objects with these fields:\n"
-        "- entity: the entity this fact is about\n"
-        "- attribute: the specific attribute (e.g. 'max_voltage', 'dosage')\n"
-        "- value: the extracted value\n"
-        "- source_type: the document source type\n"
-        "- source_doc: the source filename\n"
-        "- date: timestamp or version date\n"
-        "- confidence: HIGH / MEDIUM / LOW\n\n"
-        "DOCUMENTS:\n{documents}\n\n"
-        "RULES:\n"
+        "UNIT NORMALIZATION RULES (always apply):\n"
+        "  - Voltage → Volts (V), e.g. '3.3V' not '3300mV'\n"
+        "  - Temperature → Celsius (°C)\n"
+        "  - Current → Amps (A) or milliamps (mA)\n"
+        "  - Frequency → Hertz (Hz), kHz, MHz, GHz\n"
+        "  - Power → Watts (W)\n"
+        "  - Percentage → use '%' suffix, e.g. '96.2%'\n\n"
+        "EXTRACTION RULES:\n"
         "1. Extract ONLY facts relevant to '{target_entity}' (or all entities "
         "if target is 'GENERAL').\n"
         "2. Prefer extracting the '{target_attribute}' attribute if specified.\n"
-        "3. Include ALL factual data points you find — values, specs, limits, dates.\n"
+        "3. Include ALL factual data points: values, specs, limits, dates.\n"
         "4. If no facts can be extracted, return an empty list.\n\n"
-        "Return a JSON array of fact objects. Example:\n"
-        '[{{"entity": "RTX-9000", "attribute": "max_voltage", "value": "5.0V", '
-        '"source_type": "datasheet", "source_doc": "spec_v4.2.txt", '
-        '"date": "2024-01-15", "confidence": "HIGH"}}]'
+        "DOCUMENTS:\n{documents}"
     ))
 ])
+
+# Maximum documents to concatenate per LLM batch call
+_BATCH_SIZE = 4
+
+
+def _build_doc_text_batch(documents: list, start: int, end: int) -> str:
+    """Concatenate a slice of documents into a single prompt fragment."""
+    doc_texts = []
+    for doc in documents[start:end]:
+        src = doc.metadata.get("source", "unknown")
+        doc_id = doc.metadata.get(
+            "document_id", doc.metadata.get("source_file", "unknown")
+        )
+        date = doc.metadata.get("date", doc.metadata.get("version", "unknown"))
+        doc_texts.append(
+            f"[SOURCE: {src}] [DOC: {doc_id}] [DATE: {date}]\n"
+            f"{doc.page_content[:600]}"
+        )
+    return "\n---\n".join(doc_texts)
 
 
 def extract_facts_from_documents(
@@ -361,7 +377,13 @@ def extract_facts_from_documents(
     Extract-then-Evaluate: Distill raw document chunks into structured facts.
 
     In 'fast' mode (Ollama): metadata-only extraction (zero LLM calls).
-    In 'deep' mode (Gemini/Groq): LLM-based JSON extraction.
+    In 'deep' mode (Gemini/Groq): uses ``with_structured_output(FactCollection)``
+    with document batching to minimize API calls.
+
+    Batching Strategy:
+        Instead of 1 LLM call per document, groups up to ``_BATCH_SIZE`` (4)
+        documents into a single prompt.  For 10 documents this means ~3 calls
+        instead of ~10, reducing RPM by ~3-4×.
 
     Args:
         documents: List of LangChain Document objects.
@@ -377,7 +399,7 @@ def extract_facts_from_documents(
 
     from shared.schemas import ExtractedFact, FactCollection
 
-    # --- Fast mode: metadata-only extraction (no LLM call) ---
+    # ── Fast mode: metadata-only extraction (no LLM call) ──────────────
     if RETRIEVAL_MODE == "fast":
         print(f"[FACT EXTRACT] Fast mode — extracting {len(documents)} facts from metadata only")
         facts = []
@@ -392,7 +414,6 @@ def extract_facts_from_documents(
             if entity_lower and entity_lower in content_lower:
                 fact_entity = target_entity
             elif entity_lower:
-                # Doc doesn't mention the target entity — label with actual content entity
                 fact_entity = doc.metadata.get("title", "unrelated_doc")[:50]
             else:
                 fact_entity = "unknown"
@@ -400,7 +421,7 @@ def extract_facts_from_documents(
             fact = ExtractedFact(
                 entity=fact_entity,
                 attribute=target_attribute if target_attribute != "GENERAL" else "general_info",
-                value=doc.page_content[:100],  # Keep small for fast mode
+                value=doc.page_content[:100],
                 source_type=src,
                 source_doc=str(doc_id),
                 date=str(date),
@@ -409,68 +430,96 @@ def extract_facts_from_documents(
             facts.append(fact.model_dump())
         return facts
 
-    # --- Deep mode: LLM-based extraction ---
-    # Build document text for the extraction prompt
-    doc_texts = []
-    for doc in documents:
-        src = doc.metadata.get("source", "unknown")
-        doc_id = doc.metadata.get("document_id", doc.metadata.get("source_file", "unknown"))
-        date = doc.metadata.get("date", doc.metadata.get("version", "unknown"))
-        doc_texts.append(
-            f"[SOURCE: {src}] [DOC: {doc_id}] [DATE: {date}]\n{doc.page_content[:600]}"
-        )
-    documents_text = "\n---\n".join(doc_texts)
+    # ── Deep mode: LLM-based structured extraction with batching ───────
+    import time as _time
+    from shared.config import BATCH_DELAY
 
-    # --- Text-based JSON extraction (compatible with all backends) ---
-    try:
-        chain = _FACT_EXTRACTION_PROMPT | config.llm | StrOutputParser()
-        raw = llm_invoke_with_retry(chain, {
-            "target_entity": target_entity,
-            "target_attribute": target_attribute,
-            "documents": documents_text,
-        })
+    all_facts: list[dict] = []
+    n_docs = len(documents)
+    n_batches = (n_docs + _BATCH_SIZE - 1) // _BATCH_SIZE
+    print(f"[FACT EXTRACT] Deep mode — {n_docs} docs in {n_batches} batch(es)")
 
-        # Parse JSON from response (handle markdown code blocks)
-        import json, re
-        raw_clean = raw.strip()
-        if "```" in raw_clean:
-            match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw_clean)
-            if match:
-                raw_clean = match.group(1).strip()
+    for batch_idx in range(n_batches):
+        start = batch_idx * _BATCH_SIZE
+        end = min(start + _BATCH_SIZE, n_docs)
+        documents_text = _build_doc_text_batch(documents, start, end)
 
-        parsed = json.loads(raw_clean)
-        if isinstance(parsed, list):
-            facts = []
-            for item in parsed:
-                if isinstance(item, dict):
-                    try:
-                        fact = ExtractedFact(**item)
-                        if source_type_override:
-                            fact.source_type = source_type_override
-                        facts.append(fact.model_dump())
-                    except Exception:
-                        continue
-            print(f"[FACT EXTRACT] Text fallback: {len(facts)} facts extracted")
-            return facts
-    except Exception as e:
-        print(f"[FACT EXTRACT] Text extraction failed ({e})")
+        # ── Primary: with_structured_output (Pydantic-enforced) ────────
+        try:
+            structured_llm = config.llm.with_structured_output(FactCollection)
+            chain = _FACT_EXTRACTION_PROMPT | structured_llm
+            result: FactCollection = llm_invoke_with_retry(chain, {
+                "target_entity": target_entity,
+                "target_attribute": target_attribute,
+                "documents": documents_text,
+            })
+            for fact in result.facts:
+                if source_type_override:
+                    fact.source_type = source_type_override
+                all_facts.append(fact.model_dump())
+            print(
+                f"[FACT EXTRACT] Batch {batch_idx + 1}/{n_batches}: "
+                f"{len(result.facts)} facts (structured output)"
+            )
+        except Exception as e:
+            print(f"[FACT EXTRACT] Structured output failed ({e}), falling back to text parsing")
 
-    # --- Fallback: Minimal extraction from metadata only (no LLM) ---
-    print("[FACT EXTRACT] ⚠️ All extraction methods failed, using metadata-only fallback")
-    facts = []
-    for doc in documents:
-        src = doc.metadata.get("source", source_type_override or "unknown")
-        doc_id = doc.metadata.get("document_id", "unknown")
-        date = doc.metadata.get("date", doc.metadata.get("version", "unknown"))
-        fact = ExtractedFact(
-            entity=target_entity if target_entity != "GENERAL" else "unknown",
-            attribute=target_attribute if target_attribute != "GENERAL" else "general_info",
-            value=doc.page_content[:200],
-            source_type=src,
-            source_doc=str(doc_id),
-            date=str(date),
-            confidence="LOW",
-        )
-        facts.append(fact.model_dump())
-    return facts
+            # ── Fallback: text + regex JSON parsing ────────────────────
+            try:
+                chain = _FACT_EXTRACTION_PROMPT | config.llm | StrOutputParser()
+                raw = llm_invoke_with_retry(chain, {
+                    "target_entity": target_entity,
+                    "target_attribute": target_attribute,
+                    "documents": documents_text,
+                })
+                import json as _json
+                raw_clean = raw.strip()
+                if "```" in raw_clean:
+                    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw_clean)
+                    if match:
+                        raw_clean = match.group(1).strip()
+
+                parsed = _json.loads(raw_clean)
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            try:
+                                fact = ExtractedFact(**item)
+                                if source_type_override:
+                                    fact.source_type = source_type_override
+                                all_facts.append(fact.model_dump())
+                            except Exception:
+                                continue
+                    print(
+                        f"[FACT EXTRACT] Batch {batch_idx + 1}/{n_batches}: "
+                        f"text fallback OK"
+                    )
+            except Exception as e2:
+                print(f"[FACT EXTRACT] Text fallback also failed ({e2})")
+
+        # ── Inter-batch throttle to respect RPM limits ─────────────────
+        if batch_idx < n_batches - 1:
+            _time.sleep(BATCH_DELAY)
+
+    # ── Last-resort: metadata-only fallback if everything failed ───────
+    if not all_facts:
+        print("[FACT EXTRACT] ⚠️ All extraction methods failed, using metadata-only fallback")
+        for doc in documents:
+            src = doc.metadata.get("source", source_type_override or "unknown")
+            doc_id = doc.metadata.get("document_id", "unknown")
+            date = doc.metadata.get("date", doc.metadata.get("version", "unknown"))
+            fact = ExtractedFact(
+                entity=target_entity if target_entity != "GENERAL" else "unknown",
+                attribute=target_attribute if target_attribute != "GENERAL" else "general_info",
+                value=doc.page_content[:200],
+                source_type=src,
+                source_doc=str(doc_id),
+                date=str(date),
+                confidence="LOW",
+            )
+            all_facts.append(fact.model_dump())
+
+    print(f"[FACT EXTRACT] Total: {len(all_facts)} facts extracted")
+    return all_facts
+
 

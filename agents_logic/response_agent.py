@@ -199,31 +199,48 @@ def run(state: GraphState) -> dict:
     context_text = "\n".join(context_parts)
 
     # --- Report Compiler prompt ---
+    discrepancy_note = ""
+    if verdict_dict:
+        raw_status = verdict_dict.get("overall_status")
+        # Handle both Enums and strings (e.g. ConflictStatus.DISCREPANCY or "DISCREPANCY")
+        status_str = str(raw_status).split(".")[-1].upper()
+        if status_str == "DISCREPANCY":
+            discrepancy_note = (
+                "⚠️ DISCREPANCY DETECTED! You MUST start your response with a section titled "
+                "'⚠️ DISCREPANCY SUMMARY'. In this section, clearly explain the specific conflict "
+                "found between sources (e.g. 'DB lists 3.6V while Doc lists 5.0V'). "
+                "Identify the authoritative value (DB > Official > Informal). "
+                "Only after this summary should you provide the key fields and values.\n\n"
+            )
+
     if critique:
         print(f"[Response Agent] 🔄 Refinement iteration. Critique: {critique[:100]}...")
         system_instruction = (
-            "You are VERA Report Compiler. Recompile the report addressing conflicts.\n"
+            f"You are VERA Report Compiler. Recompile the report addressing conflicts.\n\n"
+            f"{discrepancy_note}"
             "Use ONLY the facts in CONTEXT. Database overrides documents.\n"
-            f"DISCREPANCY:\n{critique[:300]}\n"
+            f"AUDIT FINDINGS:\n{critique[:500]}\n\n"
+            "CITE SOURCES for everything.\n"
         )
     elif RETRIEVAL_MODE == "fast":
         print("[Response Agent] Compiling report (fast mode)...")
         system_instruction = (
-            "You are VERA Report Compiler. Answer the question using ONLY the CONTEXT below.\n"
-            "Rules: Use only provided data. Database overrides documents. "
-            "If data not found, say so. Be concise and direct."
+            f"You are VERA Report Compiler. Answer the question using ONLY the CONTEXT below.\n\n"
+            f"{discrepancy_note}"
+            "Summarize the key fields and values found. Be concise.\n"
+            "Rules: Database results override documents when both exist.\n"
+            "CITE SOURCES (e.g. [DATABASE], [DATASHEET]).\n"
         )
     else:
         print("[Response Agent] Compiling report from structured facts...")
         system_instruction = (
-            "You are VERA Report Compiler. Your ONLY job is to format and "
-            "synthesize the pre-filtered facts below into a structured report.\n\n"
+            f"You are VERA Report Compiler. Synthesize the pre-filtered facts into a report.\n\n"
+            f"{discrepancy_note}"
             "RULES:\n"
-            "1. Use ONLY the facts in CONTEXT. DO NOT guess.\n"
-            "2. DIRECT ANSWER FIRST.\n"
-            "3. DB AUTHORITY: Database overrides documents.\n"
+            "1. DIRECT ANSWER FIRST.\n"
+            "2. DB AUTHORITY: Database results override documents.\n"
+            "3. CITE SOURCES.\n"
             "4. ENTITY ISOLATION: Only report on the queried entity.\n"
-            "5. CITE SOURCES. If not found, say '[NOT FOUND IN AVAILABLE DATA]'.\n"
         )
 
     prompt = ChatPromptTemplate.from_messages([
@@ -240,13 +257,15 @@ def run(state: GraphState) -> dict:
         "question": question,
     })
 
+    thinking = (
+        f"Report Compiler: compiled response from {len(all_facts)} structured facts "
+        f"+ {len(documents)} docs (confidence={retrieval_confidence}). "
+        f"{'Refinement mode.' if critique else 'Initial compilation.'}"
+    )
+
     return {
         "generation": response,
-        "documents": documents,
+        "thought_process": [thinking],
         "critique": critique,
-        "_thinking": (
-            f"Report Compiler: compiled response from {len(all_facts)} structured facts "
-            f"+ {len(documents)} docs (confidence={retrieval_confidence}). "
-            f"{'Refinement mode.' if critique else 'Initial compilation.'}"
-        ),
+        "_thinking": thinking,
     }

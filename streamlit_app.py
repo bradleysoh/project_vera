@@ -523,40 +523,47 @@ for idx, msg in enumerate(st.session_state.messages):
 
             # -- Discrepancy report --
             if msg.get("discrepancy_report"):
-                st.error("🚨 **CONFLICT DETECTED — HUMAN REVIEW REQUIRED**")
+                # Check if there's an actual discrepancy or just an aligned audit
+                has_real_conflict = msg.get("has_discrepancy", False)
                 
-                with st.expander("📋 View Discrepancy Report", expanded=True):
+                if has_real_conflict:
+                    st.error("🚨 **CONFLICT DETECTED — HUMAN REVIEW REQUIRED**")
+                else:
+                    st.info("✅ **AUDIT COMPLETE — NO CONFLICTS FOUND**")
+                
+                with st.expander("📋 View Discrepancy Report", expanded=has_real_conflict):
                     st.markdown(sanitize_text(msg["discrepancy_report"]))
                     
-                    st.markdown("---")
-                    st.write("**👨‍⚖️ Human Decision Required:**")
+                    if has_real_conflict:
+                        st.markdown("---")
+                        st.write("**👨‍⚖️ Human Decision Required:**")
 
-                    # Find the user query for this assistant message
-                    _query = ""
-                    for _prev_idx in range(idx - 1, -1, -1):
-                        if st.session_state.messages[_prev_idx]["role"] == "user":
-                            _query = st.session_state.messages[_prev_idx]["content"]
-                            break
+                        # Find the user query for this assistant message
+                        _query = ""
+                        for _prev_idx in range(idx - 1, -1, -1):
+                            if st.session_state.messages[_prev_idx]["role"] == "user":
+                                _query = st.session_state.messages[_prev_idx]["content"]
+                                break
 
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        if st.button("✅ Accept AI Resolution", key=f"btn_acc_{idx}"):
-                            _send_accept_email(
-                                _query, msg["content"],
-                                msg["discrepancy_report"], user_role, user_domain,
-                            )
-                    with c2:
-                        if st.button("❌ Reject & Override", key=f"btn_rej_{idx}"):
-                            _send_reject_email(
-                                _query, msg["content"],
-                                msg["discrepancy_report"], user_role, user_domain,
-                            )
-                    with c3:
-                        if st.button("🛡️ Escalate to Safety Team", key=f"btn_esc_{idx}"):
-                            _send_escalate_email(
-                                _query, msg["content"],
-                                msg["discrepancy_report"], user_role, user_domain,
-                            )
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            if st.button("✅ Accept AI Resolution", key=f"btn_acc_{idx}"):
+                                _send_accept_email(
+                                    _query, msg["content"],
+                                    msg["discrepancy_report"], user_role, user_domain,
+                                )
+                        with c2:
+                            if st.button("❌ Reject & Override", key=f"btn_rej_{idx}"):
+                                _send_reject_email(
+                                    _query, msg["content"],
+                                    msg["discrepancy_report"], user_role, user_domain,
+                                )
+                        with c3:
+                            if st.button("🛡️ Escalate to Safety Team", key=f"btn_esc_{idx}"):
+                                _send_escalate_email(
+                                    _query, msg["content"],
+                                    msg["discrepancy_report"], user_role, user_domain,
+                                )
 
             # Show sources
             if msg.get("sources"):
@@ -590,6 +597,7 @@ def process_query(question: str, role: str, domain: str, max_refinements: int = 
         "user_domain": domain,
         "documents": [],
         "route": "",
+        "intent": "",
         "flagged": False,
         "metadata_log": "",
         "retrieved_docs": {},
@@ -604,6 +612,7 @@ def process_query(question: str, role: str, domain: str, max_refinements: int = 
         "retrieval_confidence": "",
         # Structured fact passing fields
         "target_entity": "",
+        "entity_type": "",
         "target_attribute": "",
         "time_context": "",
         "official_facts": [],
@@ -730,6 +739,13 @@ def process_query(question: str, role: str, domain: str, max_refinements: int = 
                 "css": "generate",
             })
 
+    # Determine if there's a real discrepancy (not just an aligned audit)
+    discrepancy_verdict = final_state.get("discrepancy_verdict", {})
+    has_discrepancy = False
+    if discrepancy_verdict:
+        status = discrepancy_verdict.get("overall_status", "ALIGNED")
+        has_discrepancy = status == "DISCREPANCY"
+
     return {
         "role": "assistant",
         "content": generation,
@@ -738,6 +754,7 @@ def process_query(question: str, role: str, domain: str, max_refinements: int = 
         "flagged": flagged,
         "route": route,
         "discrepancy_report": discrepancy_report,
+        "has_discrepancy": has_discrepancy,
         "agent_trace": agent_trace,
         "thought_process": final_state.get("thought_process", []),
     }
@@ -789,44 +806,50 @@ if prompt := st.chat_input("Ask VERA a question..."):
         
         # Discrepancy Alert with Human Decision
         if result.get("discrepancy_report"):
-            st.error("🚨 **CONFLICT DETECTED — HUMAN REVIEW REQUIRED**")
+            has_real_conflict = result.get("has_discrepancy", False)
             
-            with st.expander("📋 View Discrepancy Report", expanded=True):
+            if has_real_conflict:
+                st.error("🚨 **CONFLICT DETECTED — HUMAN REVIEW REQUIRED**")
+            else:
+                st.info("✅ **AUDIT COMPLETE — NO CONFLICTS FOUND**")
+            
+            with st.expander("📋 View Discrepancy Report", expanded=has_real_conflict):
                 st.markdown(sanitize_text(result["discrepancy_report"]))
                 
-                st.markdown("---")
-                st.write("**👨‍⚖️ Human Decision Required:**")
+                if has_real_conflict:
+                    st.markdown("---")
+                    st.write("**👨‍⚖️ Human Decision Required:**")
 
-                msg_idx = len(st.session_state.messages)
+                    msg_idx = len(st.session_state.messages)
 
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    if st.button("✅ Accept AI Resolution", key=f"btn_acc_{msg_idx}"):
-                        _send_accept_email(
-                            prompt,
-                            result["content"],
-                            result["discrepancy_report"],
-                            user_role,
-                            user_domain,
-                        )
-                with c2:
-                    if st.button("❌ Reject & Override", key=f"btn_rej_{msg_idx}"):
-                        _send_reject_email(
-                            prompt,
-                            result["content"],
-                            result["discrepancy_report"],
-                            user_role,
-                            user_domain,
-                        )
-                with c3:
-                    if st.button("🛡️ Escalate to Safety Team", key=f"btn_esc_{msg_idx}"):
-                        _send_escalate_email(
-                            prompt,
-                            result["content"],
-                            result["discrepancy_report"],
-                            user_role,
-                            user_domain,
-                        )
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        if st.button("✅ Accept AI Resolution", key=f"btn_acc_{msg_idx}"):
+                            _send_accept_email(
+                                prompt,
+                                result["content"],
+                                result["discrepancy_report"],
+                                user_role,
+                                user_domain,
+                            )
+                    with c2:
+                        if st.button("❌ Reject & Override", key=f"btn_rej_{msg_idx}"):
+                            _send_reject_email(
+                                prompt,
+                                result["content"],
+                                result["discrepancy_report"],
+                                user_role,
+                                user_domain,
+                            )
+                    with c3:
+                        if st.button("🛡️ Escalate to Safety Team", key=f"btn_esc_{msg_idx}"):
+                            _send_escalate_email(
+                                prompt,
+                                result["content"],
+                                result["discrepancy_report"],
+                                user_role,
+                                user_domain,
+                            )
 
         # Show thought process (DeepSeek-style)
         thought_process = result.get("thought_process", [])

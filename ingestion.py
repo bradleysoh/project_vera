@@ -31,6 +31,7 @@ Usage:
 # IMPORTS
 # ==============================================================================
 import os
+import re
 import json
 import glob
 from dotenv import load_dotenv
@@ -38,6 +39,43 @@ from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
+
+
+# ==============================================================================
+# AGGRESSIVE TEXT SANITIZATION — Prevents InvalidCharacterError
+# ==============================================================================
+# Regex strips: null bytes, invalid XML control chars (0x00-0x08, 0x0B, 0x0C,
+# 0x0E-0x1F), DEL (0x7F).  Preserves newlines (\n), tabs (\t), returns (\r).
+# Applied BEFORE chunking so dirty data never enters ChromaDB.
+# ==============================================================================
+
+_INVALID_CHARS = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
+
+def sanitize_text(text: str) -> str:
+    """
+    Strip invalid control characters and enforce clean UTF-8 encoding.
+
+    Applied at ingestion time so that ChromaDB, LLM prompts, and the
+    Streamlit frontend never encounter characters that would trigger an
+    ``InvalidCharacterError``.
+
+    Handles:
+      - Null bytes (\x00)
+      - Invalid XML control characters (\x00-\x08, \x0B, \x0C, \x0E-\x1F)
+      - DEL character (\x7F)
+      - Replacement character (\uFFFD) from broken encodings
+      - Non-UTF-8 byte sequences
+    """
+    if not text:
+        return ""
+    # Force clean UTF-8 round-trip to strip broken byte sequences
+    text = text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+    # Strip Unicode replacement character from prior bad decodes
+    text = text.replace('\ufffd', '')
+    # Remove invalid XML/HTML control characters
+    text = _INVALID_CHARS.sub('', text)
+    return text
 
 # ==============================================================================
 # CONFIGURATION
@@ -560,14 +598,19 @@ def load_domain_documents() -> list[dict]:
 
             # Read content
             try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
+                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = sanitize_text(f.read().strip())
             except Exception as e:
                 print(f"    ❌ Error reading {filename}: {e}")
                 continue
 
             if not content:
                 print(f"    ⚠️  Skipped {filename} (empty)")
+                continue
+
+            # --- Physical Decoupling: skip db_info (handled by DB Agent) ---
+            if parsed["source"] == "db_info":
+                print(f"    ⏭️  Skipped {filename} (db_info → handled by DB Agent via .db files)")
                 continue
 
             # Override domain from folder name
@@ -658,13 +701,25 @@ def create_documents() -> list[Document]:
         print(f"\n[INFO] No external data found. Using {len(raw_data)} inline MOCK_DOCUMENTS.")
 
     documents = []
+    skipped_db = 0
     for doc_data in raw_data:
+        # --- Physical Decoupling: skip db_info documents ---
+        # Structured DB data is handled by the DB Agent via actual .db files.
+        # Embedding it as text into ChromaDB destroys boolean precision.
+        if doc_data.get("metadata", {}).get("source") == "db_info":
+            skipped_db += 1
+            continue
+
+        # Sanitize content before embedding
+        clean_content = sanitize_text(doc_data["content"])
         doc = Document(
-            page_content=doc_data["content"],
+            page_content=clean_content,
             metadata=doc_data["metadata"],
         )
         documents.append(doc)
 
+    if skipped_db:
+        print(f"[INFO] Excluded {skipped_db} db_info documents (handled by DB Agent).")
     print(f"[INFO] Created {len(documents)} raw documents total.")
     return documents
 
@@ -795,17 +850,17 @@ def verify_ingestion(vector_store: Chroma) -> None:
               f"[{doc.metadata.get('access_level')}] "
               f"{doc.page_content[:80]}...")
     
-    # --- Test 5: DB Info search ---
-    print("\n[TEST 5] DB Info search for 'production lot tracking':")
+    # --- Test 5: DB Info exclusion verification ---
+    print("\n[TEST 5] Verifying db_info exclusion from ChromaDB:")
     results = vector_store.similarity_search(
         "production lot tracking",
         k=3,
-        filter={"source": "db_info"},
     )
-    for i, doc in enumerate(results):
-        print(f"  Result {i+1}: [{doc.metadata.get('source')}] "
-              f"[{doc.metadata.get('access_level')}] "
-              f"{doc.page_content[:80]}...")
+    has_db_info = any(d.metadata.get('source') == 'db_info' for d in results)
+    if has_db_info:
+        print("  ⚠️  WARNING: db_info documents still in ChromaDB!")
+    else:
+        print("  ✅ No db_info documents in ChromaDB (handled by DB Agent).")
     
     # --- Test 6: Versioned document search ---
     print("\n[TEST 6] Document version search for 'RTX-9000 specification version':")

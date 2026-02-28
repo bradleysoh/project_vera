@@ -23,7 +23,9 @@ Usage:
 ================================================================================
 """
 
+import os
 import time
+from datetime import datetime
 from langgraph.graph import StateGraph, END
 
 # --- Import shared state and config ---
@@ -77,109 +79,116 @@ def build_graph():
     # --- Step 4: Entry point ---
     workflow.set_entry_point("route_query")
 
-    # --- Step 6: Wire domain-specific agent chains (SEQUENTIAL) ---
-    # DB (Reality) -> Official (Baseline) -> Informal (Exception) -> Response
-    
-    # Also build the route map: domain -> start_node
-    route_map = {"escalate": "escalate"}
+    # --- Step 5: Intent-Based Conditional Routing (Surgical) ---
+    # Instead of broadcasting to ALL agents, route to specific subchains
+    # based on fine-grained intent from the router.
+    #
+    # Intent → Subchain:
+    #   general_chat    → generate_response (skip all retrieval)
+    #   db_query        → DB → generate_response
+    #   spec_retrieval  → Official → generate_response
+    #   cross_reference → DB → Official → Informal → generate_response → Discrepancy
+    #   escalate        → escalate → END
+
+    route_map = {
+        "escalate": "escalate",
+        "general_chat": "generate_response",
+    }
 
     for domain, agents in domain_agents.items():
-        # Identify available nodes
-        chain = []
-        
-        # Priority 1: DB Agent
-        if "db_agent" in agents:
-            chain.append(get_agent_node_name(domain, "db_agent"))
-            
-        # Priority 2: Official Docs (was tech_spec/compliance)
-        if "official_docs_agent" in agents:
-            chain.append(get_agent_node_name(domain, "official_docs_agent"))
-        elif "tech_spec_agent" in agents: # Fallback support
-            chain.append(get_agent_node_name(domain, "tech_spec_agent"))
-            
-        # Priority 3: Informal Docs
-        if "informal_docs_agent" in agents:
-            chain.append(get_agent_node_name(domain, "informal_docs_agent"))
-        elif "compliance_agent" in agents: # Fallback support
-            chain.append(get_agent_node_name(domain, "compliance_agent"))
+        # Resolve node names for this domain's agents
+        db_node = get_agent_node_name(domain, "db_agent") if "db_agent" in agents else None
+        official_node = (
+            get_agent_node_name(domain, "official_docs_agent")
+            if "official_docs_agent" in agents
+            else get_agent_node_name(domain, "tech_spec_agent")
+            if "tech_spec_agent" in agents
+            else None
+        )
+        informal_node = (
+            get_agent_node_name(domain, "informal_docs_agent")
+            if "informal_docs_agent" in agents
+            else get_agent_node_name(domain, "compliance_agent")
+            if "compliance_agent" in agents
+            else None
+        )
 
-        # Always end with response generation
-        chain.append("generate_response")
-
-        if not chain[:-1]: # If no domain agents found, skip
+        if not any([db_node, official_node, informal_node]):
             print(f"[GRAPH] ⚠️ No agents found for domain '{domain}', skipping wiring.")
             continue
 
-        # Wire the sequential chain
-        print(f"[GRAPH] Wiring chain for {domain}: {' -> '.join(chain)}")
-        for i in range(len(chain) - 1):
-            workflow.add_edge(chain[i], chain[i+1])
+        # --- Wire domain agents with CONDITIONAL edges (strictly sequential) ---
+        # Each agent checks state["intent"] to decide its SINGLE successor.
+        # This prevents LangGraph from following multiple edges (forking).
 
-        # Map the domain name to the START of the chain
-        start_node = chain[0]
-        route_map[domain] = start_node
+        # --- Routing logic for Discrepancy Agent (Auditor) ---
+        def route_to_auditor(domain: str, fallback_node: str):
+            def _router(state: GraphState) -> str:
+                if state.get("intent") == "cross_reference":
+                    # Find discrepancy node for this domain
+                    agents = domain_agents.get(domain, {})
+                    if "discrepancy_agent" in agents:
+                        return "to_auditor"
+                return "to_response"
+            return _router
 
-    # --- Step 5: Conditional Routing (Updated) ---
-    # The router returns "semiconductor" -> mapped to start_node
+        # DB Agent → (Official or Auditor or Response)
+        if db_node:
+            route_map[f"{domain}__db_query"] = db_node
+            route_map[f"{domain}__cross_reference"] = db_node
+            
+            if official_node:
+                def _db_router(state: GraphState) -> str:
+                    if state.get("intent") == "cross_reference":
+                        return "to_official"
+                    return "to_response"
+                workflow.add_conditional_edges(db_node, _db_router, {"to_official": official_node, "to_response": "generate_response"})
+            else:
+                workflow.add_conditional_edges(db_node, route_to_auditor(domain, "generate_response"), 
+                                                {"to_auditor": get_agent_node_name(domain, "discrepancy_agent"), "to_response": "generate_response"})
+
+        # Official Agent → (Informal or Auditor or Response)
+        if official_node:
+            route_map[f"{domain}__spec_retrieval"] = official_node
+            if f"{domain}__cross_reference" not in route_map:
+                route_map[f"{domain}__cross_reference"] = official_node
+
+            if informal_node:
+                def _off_router(state: GraphState) -> str:
+                    if state.get("intent") == "cross_reference":
+                        return "to_informal"
+                    return "to_response"
+                workflow.add_conditional_edges(official_node, _off_router, {"to_informal": informal_node, "to_response": "generate_response"})
+            else:
+                workflow.add_conditional_edges(official_node, route_to_auditor(domain, "generate_response"), 
+                                                {"to_auditor": get_agent_node_name(domain, "discrepancy_agent"), "to_response": "generate_response"})
+
+        # Informal Agent → (Auditor or Response)
+        if informal_node:
+            if f"{domain}__cross_reference" not in route_map:
+                route_map[f"{domain}__cross_reference"] = informal_node
+            
+            workflow.add_conditional_edges(informal_node, route_to_auditor(domain, "generate_response"), 
+                                            {"to_auditor": get_agent_node_name(domain, "discrepancy_agent"), "to_response": "generate_response"})
+
+    # --- Conditional edge from router to intent-based subchains ---
     workflow.add_conditional_edges(
         "route_query",
         router_agent.decide_route,
         route_map,
     )
 
-    # Response -> Discrepancy (CONDITIONAL — must route to correct domain)
-    # We use a conditional edge because generate_response is shared across
-    # all domains, so we need to dispatch based on next_agent.
-    
-    def route_from_discrepancy(state: GraphState) -> str:
-        """
-        Route from Discrepancy Agent:
-        - If 'critique' exists -> Loop back to 'generate_response' for refinement.
-        - Else -> END.
-        """
-        if state.get("critique"):
-            count = state.get("refinement_count", 0)
-            print(f"[ROUTING] {state.get('next_agent')}_check_discrepancy -> Refinement Loop ({count})")
-            return "generate_response"
-        return END
-
-    discrepancy_route_map = {}
+    # --- Auditor → Responder ---
     for domain, agents in domain_agents.items():
         if "discrepancy_agent" in agents:
-            discrepancy_node = get_agent_node_name(domain, "discrepancy_agent")
-            discrepancy_route_map[domain] = discrepancy_node
-            
-            # Conditional edge for feedback loop
-            workflow.add_conditional_edges(
-                discrepancy_node,
-                route_from_discrepancy,
-                {"generate_response": "generate_response", END: END}
-            )
+            d_node = get_agent_node_name(domain, "discrepancy_agent")
+            # Auditor ALWAYS goes to Responder next
+            workflow.add_edge(d_node, "generate_response")
 
-    def route_to_discrepancy(state: GraphState) -> str:
-        """Route from generate_response to the correct domain's discrepancy agent."""
-        domain = state.get("next_agent", "")
-        if domain in discrepancy_route_map:
-            print(f"[ROUTING] generate_response -> {discrepancy_route_map[domain]}")
-            return domain
-        # Fallback to first available domain
-        if discrepancy_route_map:
-            fallback_key = next(iter(discrepancy_route_map.keys()))
-            print(f"[ROUTING] generate_response -> {discrepancy_route_map[fallback_key]} (fallback)")
-            return fallback_key
-        return END
+    # --- Responder → END ---
+    workflow.add_edge("generate_response", END)
 
-    # Include END in the route map for cases where no domain match exists
-    discrepancy_route_with_end = dict(discrepancy_route_map)
-    discrepancy_route_with_end[END] = END
-
-    workflow.add_conditional_edges(
-        "generate_response",
-        route_to_discrepancy,
-        discrepancy_route_with_end,
-    )
-
-    # Escalation -> END
+    # Escalation → END
     workflow.add_edge("escalate", END)
 
     compiled_graph = workflow.compile()
@@ -189,8 +198,49 @@ def build_graph():
     print(f"\n[GRAPH] VERA workflow compiled successfully!")
     print(f"[GRAPH] Nodes ({len(all_nodes)}): {all_nodes}")
     print(f"[GRAPH] Domains: {list(domain_agents.keys())}")
+    print(f"[GRAPH] Route map: {route_map}")
 
     return compiled_graph
+
+
+# ==============================================================================
+# LOGGING UTILITIES
+# ==============================================================================
+
+def _log_to_files(state: dict, domain: str) -> None:
+    """
+    Log test results to domain-specific files in the output/ directory.
+    - verification.log: question + generation
+    - discrepancy.log: discrepancy_report
+    - debug.log: thought_process + metadata_log
+    """
+    output_base = os.path.join(os.path.dirname(__file__), "output")
+    domain_dir = os.path.join(output_base, domain)
+    os.makedirs(domain_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    separator = "=" * 80
+
+    # 1. Verification Log
+    with open(os.path.join(domain_dir, "verification.log"), "a", encoding="utf-8") as f:
+        f.write(f"\n{separator}\n[{timestamp}] QUESTION: {state.get('question')}\n{separator}\n")
+        f.write(f"{state.get('generation', 'No generation.')}\n")
+
+    # 2. Discrepancy Log
+    report = state.get("discrepancy_report")
+    if report:
+        with open(os.path.join(domain_dir, "discrepancy.log"), "a", encoding="utf-8") as f:
+            f.write(f"\n{separator}\n[{timestamp}] AUDIT: {state.get('target_entity')}\n{separator}\n")
+            f.write(f"{report}\n")
+
+    # 3. Debug Log
+    with open(os.path.join(domain_dir, "debug.log"), "a", encoding="utf-8") as f:
+        f.write(f"\n{separator}\n[{timestamp}] DEBUG: {state.get('question')}\n{separator}\n")
+        f.write("--- THOUGHT PROCESS ---\n")
+        for step in state.get("thought_process", []):
+            f.write(f"  {step}\n")
+        f.write("\n--- METADATA LOG ---\n")
+        f.write(f"{state.get('metadata_log', 'No metadata log.')}\n")
 
 
 # ==============================================================================
@@ -219,6 +269,7 @@ def run_test_query(
         "user_domain": user_domain,
         "documents": [],
         "route": "",
+        "intent": "",
         "flagged": False,
         "metadata_log": "",
         "retrieved_docs": {},
@@ -233,6 +284,7 @@ def run_test_query(
         "retrieval_confidence": "",
         # Structured Fact Passing fields
         "target_entity": "",
+        "entity_type": "",
         "target_attribute": "",
         "time_context": "",
         "official_facts": [],
@@ -246,6 +298,9 @@ def run_test_query(
 
 
     result = graph.invoke(initial_state)
+
+    # --- Systematic Logging (Phase 8) ---
+    _log_to_files(result, user_domain)
 
     print(f"\n{'─'*60}")
     print(f"📊 RESULT (Test {test_number}):")

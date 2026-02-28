@@ -41,6 +41,12 @@ class QueryIntent(BaseModel):
         description="The primary entity mentioned (product ID, patient ID, "
                     "lot number).  'GENERAL' if no specific entity.",
     )
+    entity_type: str = Field(
+        default="GENERAL",
+        description="Categorical type of the entity (e.g. 'customer', "
+                    "'product', 'wafer', 'lot', 'patient'). "
+                    "'GENERAL' if unknown.",
+    )
     target_attribute: str = Field(
         default="GENERAL",
         description="The specific attribute being asked about (e.g., "
@@ -165,27 +171,43 @@ class DiscrepancyVerdict(BaseModel):
 
     def to_report_string(self) -> str:
         """Serialize to a human-readable audit report string."""
+        status_emoji = {
+            ConflictStatus.ALIGNED: "✅",
+            ConflictStatus.DISCREPANCY: "❌",
+            ConflictStatus.INSUFFICIENT_DATA: "⚠️",
+        }.get(self.overall_status, "🔍")
+
         lines = [
-            f"**AUDIT TARGET**: {self.target_entity}",
-            f"**STATUS**: {self.overall_status.value}",
-            "",
+            f"### {status_emoji} AUDIT TARGET: {self.target_entity}",
+            f"**OVERALL STATUS**: {self.overall_status.value}",
+            "---",
+            ""
         ]
+
         for i, c in enumerate(self.conflicts, 1):
-            lines.append(f"**{i}. {c.attribute}** ({c.status.value})")
+            emoji = "✅" if c.status == ConflictStatus.ALIGNED else "❌" if c.status == ConflictStatus.DISCREPANCY else "⚠️"
+            lines.append(f"#### {i}. {emoji} {c.attribute.upper()}")
+            lines.append(f"**Status**: {c.status.value}")
+
             if c.authoritative_value:
+                date_str = f" (Date: {c.authoritative_date})" if c.authoritative_date else ""
                 lines.append(
-                    f"   Authoritative: {c.authoritative_value} "
-                    f"(Source: {c.authoritative_source}, Date: {c.authoritative_date})"
+                    f"**Authoritative Value**: `{c.authoritative_value}`  \n"
+                    f"Source: {c.authoritative_source.upper()}{date_str}"
                 )
-            for cv in c.conflicting_values:
-                lines.append(
-                    f"   Conflict: {cv.get('value', '?')} "
-                    f"(Source: {cv.get('source', '?')}, "
-                    f"Reason: {cv.get('reason', 'lower authority')})"
-                )
+
+            if c.conflicting_values:
+                lines.append("\n**Conflicts Detected:**")
+                for cv in c.conflicting_values:
+                    c_date = f" ({cv.get('date', 'unknown')})" if cv.get('date') else ""
+                    lines.append(
+                        f"- `{cv.get('value', '?')}` from {cv.get('source', '?').upper()}{c_date}  \n"
+                        f"  *Reason: {cv.get('reason', 'lower authority')}*"
+                    )
             lines.append("")
 
         if self.audit_summary:
-            lines.append(f"**AUDIT CONCLUSION**: {self.audit_summary}")
+            lines.append("---")
+            lines.append(f"**AUDIT SUMMARY**: {self.audit_summary}")
 
         return "\n".join(lines)

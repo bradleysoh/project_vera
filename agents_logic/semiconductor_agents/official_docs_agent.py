@@ -35,6 +35,12 @@ def run(state: GraphState) -> dict:
     target_entity = state.get("target_entity", "GENERAL")
     target_attribute = state.get("target_attribute", "GENERAL")
 
+    # --- Guard Clause: Fast-fail if intent doesn't need specs ---
+    intent = state.get("intent", "")
+    if intent not in ("spec_retrieval", "cross_reference", ""):
+        print(f"[Official Docs Agent] ⏭️ Fast-fail: intent='{intent}' is not spec-related")
+        return {}
+
     # --- Stage 1: Precision Retrieval ---
     result = query_understand_and_retrieve(
         query=question,
@@ -56,25 +62,17 @@ def run(state: GraphState) -> dict:
 
     print(f"[Official Docs Agent] {len(result.documents)} docs → {len(facts)} structured facts")
 
-    # Accumulate into existing facts
-    existing_facts = state.get("official_facts") or []
-    all_facts = existing_facts + facts
-
-    # Keep raw docs for backward compatibility (response agent may still use them)
-    existing_docs = state.get("documents", [])
-    retrieved_docs = state.get("retrieved_docs") or {}
-    retrieved_docs["official"] = result.documents
-
+    # Per-step return: ONLY the tokens we added (reducers handle the merge)
     return {
-        "official_facts": all_facts,
+        "official_facts": facts,
         "official_data": result.documents,
-        "documents": existing_docs + result.documents,
-        "metadata_log": state.get("metadata_log", "") + result.metadata_log,
-        "retrieved_docs": retrieved_docs,
+        "documents": result.documents,
+        "metadata_log": result.metadata_log,
         "retrieval_confidence": result.confidence,
-        "_thinking": (
+        "thought_process": [
             f"Retrieve→Extract: {len(result.documents)} docs → {len(facts)} facts "
             f"(entity='{target_entity}', attr='{target_attribute}', "
             f"confidence={result.confidence})."
-        ),
+        ],
+        "_thinking": f"Refined {len(facts)} facts from specs.",
     }

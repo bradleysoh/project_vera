@@ -35,6 +35,12 @@ def run(state: GraphState) -> dict:
     target_entity = state.get("target_entity", "GENERAL")
     target_attribute = state.get("target_attribute", "GENERAL")
 
+    # --- Guard Clause: Fast-fail if intent doesn't need informal docs ---
+    intent = state.get("intent", "")
+    if intent not in ("cross_reference", ""):
+        print(f"[Informal Docs Agent] ⏭️ Fast-fail: intent='{intent}' is not cross-reference")
+        return {}
+
     # --- Stage 1: Precision Retrieval ---
     result = query_understand_and_retrieve(
         query=question,
@@ -56,33 +62,19 @@ def run(state: GraphState) -> dict:
 
     print(f"[Informal Docs Agent] {len(result.documents)} docs → {len(facts)} structured facts")
 
-    # Accumulate into existing facts
-    existing_facts = state.get("informal_facts") or []
-    all_facts = existing_facts + facts
+    print(f"[Informal Docs Agent] {len(result.documents)} docs → {len(facts)} structured facts")
 
-    # Confidence aggregation
-    existing_confidence = state.get("retrieval_confidence", "LOW")
-    confidence_rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
-    best_confidence = max(
-        existing_confidence, result.confidence,
-        key=lambda c: confidence_rank.get(c, 0),
-    )
-
-    # Keep raw docs for backward compatibility
-    existing_docs = state.get("documents", [])
-    retrieved_docs = state.get("retrieved_docs") or {}
-    retrieved_docs["informal"] = result.documents
-
+    # Per-step return: ONLY the tokens we added (reducers handle the merge)
     return {
-        "informal_facts": all_facts,
+        "informal_facts": facts,
         "informal_data": result.documents,
-        "documents": existing_docs + result.documents,
-        "metadata_log": state.get("metadata_log", "") + result.metadata_log,
-        "retrieved_docs": retrieved_docs,
-        "retrieval_confidence": best_confidence,
-        "_thinking": (
+        "documents": result.documents,
+        "metadata_log": result.metadata_log,
+        "retrieval_confidence": result.confidence,
+        "thought_process": [
             f"Retrieve→Extract: {len(result.documents)} docs → {len(facts)} facts "
             f"(entity='{target_entity}', attr='{target_attribute}', "
-            f"confidence={result.confidence}). Overall: {best_confidence}."
-        ),
+            f"confidence={result.confidence})."
+        ],
+        "_thinking": f"Refined {len(facts)} facts from informal sources.",
     }

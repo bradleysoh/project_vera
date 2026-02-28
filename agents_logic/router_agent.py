@@ -40,97 +40,200 @@ import json
 _DOMAIN_CONFIGS = load_domain_configs()
 _ROUTING_KEYWORDS = build_routing_heuristics(_DOMAIN_CONFIGS)
 
+# ---------------------------------------------------------------------------
+# Fine-Grained Intent Classification Keywords
+# ---------------------------------------------------------------------------
+_INTENT_KEYWORDS = {
+    "db_query": [
+        "database", "db", "production data", "check the database",
+        "query", "sql", "records", "inventory", "lots that",
+        "show me the data", "look up", "find in",
+    ],
+    "spec_retrieval": [
+        "specification", "spec", "datasheet", "voltage", "thermal",
+        "maximum", "minimum", "limit", "rating", "tolerance",
+        "power", "watt", "sop", "procedure", "checklist", "process",
+        "datasheet says", "according to spec",
+    ],
+    "cross_reference": [
+        "compare", "discrepancy", "mismatch", "conflict", "versus",
+        "cross-reference", "cross reference", "check against",
+        "don't match", "doesn't match", "inconsistent",
+        "email changes", "recent changes", "version difference",
+        "any changes communicated", "tell me about", "what is",
+        "info", "details", "everything about", "search all",
+    ],
+    "general_chat": [
+        "what is vera", "what does vera", "who are you",
+        "what can you do", "help me", "hello", "hi",
+        "how do you work", "what are you",
+    ],
+}
+
+
+def _classify_intent(question: str, route: str) -> str:
+    """
+    Classify the query into a fine-grained intent.
+    Uses keyword scoring with multi-category detection.
+    
+    Key heuristic: If a query hits keywords from BOTH db_query AND
+    spec_retrieval, it likely needs cross-referencing multiple sources.
+    
+    Returns one of: db_query, spec_retrieval, cross_reference,
+                    general_chat, out_of_domain
+    """
+    q_lower = question.lower()
+
+    # Score each intent category
+    scores = {}
+    for intent_label, keywords in _INTENT_KEYWORDS.items():
+        scores[intent_label] = sum(1 for kw in keywords if kw in q_lower)
+
+    # --- Multi-category detection ---
+    # If the query matches keywords from BOTH db/spec categories,
+    # promote to cross_reference (needs data from multiple sources)
+    has_db = scores.get("db_query", 0) > 0
+    has_spec = scores.get("spec_retrieval", 0) > 0
+    has_cross = scores.get("cross_reference", 0) > 0
+
+    if has_cross:
+        return "cross_reference"
+    if has_db and has_spec:
+        return "cross_reference"
+
+    # Find the best match
+    best = max(scores, key=lambda k: scores[k])
+    best_score = scores[best]
+
+    # If no keywords matched at all, use the route as a heuristic
+    if best_score == 0:
+        if route == "compliance":
+            return "spec_retrieval"  # SOPs/procedures are specs
+        return "spec_retrieval"  # Default: treat as spec lookup
+
+    return best
+
 
 # ---------------------------------------------------------------------------
-# Query Understanding prompt (text-based fallback for small models)
+# Query Understanding — LLM-based Named Entity Recognition (NER)
 # ---------------------------------------------------------------------------
-_QUERY_INTENT_PROMPT = ChatPromptTemplate.from_messages([
+# Uses .with_structured_output(QueryIntent) for guaranteed type-safe
+# extraction of entity_name, entity_type, attribute, and time_context.
+# Falls back to a broad regex if the LLM call fails.
+# ---------------------------------------------------------------------------
+
+_NER_PROMPT = ChatPromptTemplate.from_messages([
     ("human", (
-        "You are a query analysis engine.  Extract structured metadata from "
-        "the user's question.\n\n"
+        "You are a Named Entity Recognition (NER) engine.  "
+        "Extract structured metadata from the user's question.\n\n"
         "USER QUESTION: {question}\n\n"
-        "Extract the following (leave blank if not found):\n"
-        "TARGET_ENTITY: <the primary entity, product, patient, lot, or component mentioned>\n"
-        "TARGET_ATTRIBUTE: <the specific attribute being asked about, e.g. 'max_voltage', 'dosage'>\n"
-        "TIME_CONTEXT: <any temporal qualifier, e.g. 'latest', '2024-Q3', or a specific date>\n\n"
-        "Return ONLY these three fields, one per line.  "
-        "If a field is not found, write: GENERAL"
+        "Instructions:\n"
+        "1. target_entity: The primary entity name mentioned "
+        "   (e.g. 'SuperGPU', 'WAF_003_A', 'Patient-7712').  "
+        "   Use 'GENERAL' ONLY if no entity is mentioned at all.\n"
+        "2. entity_type: The categorical TYPE of that entity "
+        "   (e.g. 'customer', 'product', 'wafer', 'lot', 'patient', "
+        "   'component', 'supplier').  Use 'GENERAL' if unclear.\n"
+        "3. target_attribute: The specific attribute being asked about "
+        "   (e.g. 'max_voltage', 'dosage', 'yield', 'status').  "
+        "   Use 'GENERAL' if no specific attribute is mentioned.\n"
+        "4. time_context: Any temporal qualifier "
+        "   (e.g. 'latest', '2024-Q3', '2025-01-15').  "
+        "   Leave empty if none mentioned.\n"
     ))
 ])
 
 
 def _extract_query_intent_regex(question: str) -> QueryIntent:
     """
-    Fast (zero-LLM-call) query intent extraction using regex patterns.
-    Used in 'fast' mode (Ollama) to avoid extra LLM calls.
+    Broad regex fallback for entity extraction — used only when 
+    LLM-based extraction fails.  Unlike the previous version, this
+    does NOT rely on hardcoded ID formats.  It captures:
+      1. Classic IDs  (WAF_001_C, RTX-9000)
+      2. Quoted terms  ("SuperGPU", 'Customer ABC')
+      3. Capitalized proper nouns  (SuperGPU, MegaChip)
     """
     import re
 
-    # Extract entity-like identifiers (alphanumeric with underscores/hyphens)
-    # Patterns: WAF_001_C, RTX-9000, LOT-2024-001, PAT_12345
-    entity_patterns = [
-        r'\b([A-Z]{2,}[-_]\d{2,}[-_][A-Z0-9]+)\b',   # WAF_001_C, LOT_001_A
-        r'\b([A-Z]{2,}[-_]\d{3,})\b',                   # RTX-9000, PAT-12345
-        r'\b([A-Z]{2,}\d{3,})\b',                        # RTX9000
-    ]
     entity = "GENERAL"
-    for pattern in entity_patterns:
-        match = re.search(pattern, question, re.IGNORECASE)
+
+    # --- Priority 1: Classic code-style IDs ---
+    id_patterns = [
+        r'\b([A-Z]{2,}[-_]\d{2,}[-_][A-Z0-9]+)\b',
+        r'\b([A-Z]{2,}[-_]\d{3,})\b',
+        r'\b([A-Z]{2,}\d{3,})\b',
+    ]
+    for pattern in id_patterns:
+        match = re.search(pattern, question)
         if match:
             entity = match.group(1)
             break
 
-    # Extract attribute hints from common keywords
-    attr_keywords = {
-        "voltage": "voltage", "yield": "yield", "defect": "defect_count",
-        "temperature": "temperature", "dosage": "dosage", "lot": "lot",
-        "wafer": "wafer", "spec": "specification", "status": "status",
-        "thermal": "thermal", "resistance": "resistance", "power": "power",
+    # --- Priority 2: Quoted strings ---
+    if entity == "GENERAL":
+        quoted = re.search(r'["\']([^"\']+ )', question)
+        if quoted:
+            entity = quoted.group(1).strip()
+
+    # --- Priority 3: Capitalized proper nouns (2+ uppercase letters) ---
+    if entity == "GENERAL":
+        # Match words like SuperGPU, MegaChip — skip common English words
+        skip = {"What", "How", "Tell", "Show", "Find", "Get", "Are", "Is",
+                "The", "About", "From", "Which", "Where", "When", "Does",
+                "Can", "Could", "Would", "Should", "Have", "Has", "Was",
+                "Were", "Will", "Do", "Did", "Any", "All", "Some", "VERA"}
+        words = re.findall(r'\b([A-Z][a-zA-Z0-9]{2,})\b', question)
+        for w in words:
+            if w not in skip:
+                entity = w
+                break
+
+    # --- Entity type hinting from question context ---
+    entity_type = "GENERAL"
+    type_hints = {
+        "customer": "customer", "client": "customer", "buyer": "customer",
+        "product": "product", "device": "product", "chip": "product",
+        "wafer": "wafer", "lot": "lot", "batch": "lot",
+        "patient": "patient", "supplier": "supplier", "vendor": "supplier",
     }
-    attribute = "GENERAL"
     q_lower = question.lower()
-    for kw, attr in attr_keywords.items():
-        if kw in q_lower:
-            attribute = attr
+    for keyword, etype in type_hints.items():
+        if keyword in q_lower:
+            entity_type = etype
             break
 
-    return QueryIntent(target_entity=entity, target_attribute=attribute)
+    return QueryIntent(target_entity=entity, entity_type=entity_type)
 
 
 def _extract_query_intent_llm(question: str) -> QueryIntent:
     """
-    LLM-based query intent extraction. Used in 'deep' mode (Gemini/Groq).
+    LLM-based NER using .with_structured_output(QueryIntent).
+    Guarantees type-safe output with entity_name, entity_type,
+    target_attribute, and time_context.
     """
     try:
-        chain = _QUERY_INTENT_PROMPT | config.llm | StrOutputParser()
-        raw = llm_invoke_with_retry(chain, {"question": question})
-
-        parsed = {"target_entity": "GENERAL", "target_attribute": "GENERAL", "time_context": ""}
-        for line in raw.strip().split("\n"):
-            line = line.strip()
-            if ":" not in line:
-                continue
-            key, _, value = line.partition(":")
-            key = key.strip().lower().replace(" ", "_")
-            value = value.strip()
-            if key == "target_entity" and value and value.upper() != "GENERAL":
-                parsed["target_entity"] = value
-            elif key == "target_attribute" and value and value.upper() != "GENERAL":
-                parsed["target_attribute"] = value
-            elif key == "time_context" and value and value.upper() != "GENERAL":
-                parsed["time_context"] = value
-
-        return QueryIntent(**parsed)
+        # with_structured_output returns a QueryIntent directly — no parsing
+        structured_llm = config.llm.with_structured_output(QueryIntent)
+        chain = _NER_PROMPT | structured_llm
+        intent = llm_invoke_with_retry(chain, {"question": question})
+        return intent
     except Exception as e:
-        print(f"[Router Agent] LLM intent extraction failed ({e}), falling back to regex")
+        print(f"[Router Agent] ⚠️ LLM NER failed ({e}), falling back to regex")
         return _extract_query_intent_regex(question)
 
 
 def _extract_query_intent(question: str) -> QueryIntent:
-    """Route to regex (fast) or LLM (deep) based on RETRIEVAL_MODE."""
+    """
+    Route to LLM-based NER (preferred) or regex fallback.
+    Fast mode still attempts LLM if available; regex is last resort.
+    """
     from shared.config import RETRIEVAL_MODE
     if RETRIEVAL_MODE == "fast":
-        return _extract_query_intent_regex(question)
+        # In fast mode, try LLM first but fall back to regex on failure
+        try:
+            return _extract_query_intent_llm(question)
+        except Exception:
+            return _extract_query_intent_regex(question)
     return _extract_query_intent_llm(question)
 
 
@@ -151,7 +254,8 @@ def run(state: GraphState) -> dict:
     # --- Step 1: Query Understanding — extract entity, attribute, time ---
     intent = _extract_query_intent(question)
     print(f"[Router Agent] Query Intent: entity='{intent.target_entity}', "
-          f"attr='{intent.target_attribute}', time='{intent.time_context}'")
+          f"type='{intent.entity_type}', attr='{intent.target_attribute}', "
+          f"time='{intent.time_context}'")
 
     # --- Step 2: Classify intent using dynamically-loaded keywords ---
     q_lower = question.lower()
@@ -170,6 +274,10 @@ def run(state: GraphState) -> dict:
     route = best_intent
     score_str = ", ".join(f"{k}={v}" for k, v in intent_scores.items())
     print(f"[Router Agent] Classified intent: {route} ({score_str})")
+
+    # --- Step 2b: Fine-grained intent classification ---
+    fine_intent = _classify_intent(question, route)
+    print(f"[Router Agent] Fine-grained intent: {fine_intent}")
 
     # --- Step 3: Determine query domain ---
     available_domains = get_available_domains()
@@ -294,15 +402,18 @@ def run(state: GraphState) -> dict:
         f"User role='{user_role}', domain='{user_domain}'. "
         f"Intent: '{route}' ({score_str}). "
         f"Detected domain: '{next_agent}'. Flagged: {flagged}. "
-        f"Entity: '{intent.target_entity}', Attr: '{intent.target_attribute}'."
+        f"Entity: '{intent.target_entity}' (type={intent.entity_type}), "
+        f"Attr: '{intent.target_attribute}'."
     )
 
     return {
         "route": route,
+        "intent": fine_intent,
         "flagged": flagged,
         "next_agent": next_agent,
-        "user_domain": detected_domain,  # Update domain so downstream agents use correct path
+        "user_domain": detected_domain,
         "target_entity": intent.target_entity,
+        "entity_type": intent.entity_type,
         "target_attribute": intent.target_attribute,
         "time_context": intent.time_context,
         "metadata_log": metadata_log,
@@ -312,7 +423,10 @@ def run(state: GraphState) -> dict:
 
 def decide_route(state: GraphState) -> str:
     """
-    Conditional edge function: Routes to the start of the domain's agent chain.
+    Conditional edge switchboard: Routes based on fine-grained intent.
+    
+    Returns compound keys like "semiconductor__db_query" so app.py
+    conditional edges can dispatch to different subchains per intent.
     """
     if state.get("flagged", False):
         print("[ROUTING] -> Escalation (security flag or unresolved domain)")
@@ -323,5 +437,14 @@ def decide_route(state: GraphState) -> str:
         print("[ROUTING] -> Escalation (no domain detected)")
         return "escalate"
 
-    print(f"[ROUTING] -> {domain} (Start of Chain)")
-    return domain
+    intent = state.get("intent", "spec_retrieval")
+
+    # General chat bypasses all domain agents entirely
+    if intent == "general_chat":
+        print("[ROUTING] -> generate_response (general_chat — skipping all retrieval)")
+        return "general_chat"
+
+    # Build compound key for domain-specific intent routing
+    route_key = f"{domain}__{intent}"
+    print(f"[ROUTING] -> {route_key}")
+    return route_key

@@ -159,13 +159,13 @@ def execute_read_only(db_path: str, sql: str) -> tuple[list[str], list[tuple]]:
 
 
 def format_results(columns: list[str], rows: list[tuple]) -> str:
-    """Format SQL results as a human-readable table string."""
+    """Format SQL results as a Markdown table string."""
     if not rows:
         return "No rows returned."
 
-    header = " | ".join(columns)
-    sep = "-+-".join("-" * max(len(c), 8) for c in columns)
+    header = "| " + " | ".join(columns) + " |"
+    sep = "| " + " | ".join("---" for _ in columns) + " |"
     lines = [header, sep]
     for row in rows:
-        lines.append(" | ".join(str(v) for v in row))
+        lines.append("| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |")
     return "\n".join(lines)

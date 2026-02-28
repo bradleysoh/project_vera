@@ -74,8 +74,11 @@ print(f"[CONFIG] Using LLM backend: {LLM_BACKEND.upper()}")
 print(f"[CONFIG] Retrieval mode: {RETRIEVAL_MODE.upper()}")
 
 # Retry settings
-MAX_RETRIES = 5
-INITIAL_RETRY_DELAY = 60  # seconds
+MAX_RETRIES = 3
+INITIAL_RETRY_DELAY = 5   # seconds (was 60 — reduced to avoid multi-minute hangs)
+
+# Batch delay between consecutive LLM calls in fact extraction (seconds)
+BATCH_DELAY = 1.5
 
 
 # ==============================================================================
