@@ -29,21 +29,18 @@
 
 **Project VERA** is an industry-agnostic Multi-Agent System that audits technical documents, emails, and Standard Operating Procedures (SOPs) for compliance issues. While the included demo uses a **semiconductor manufacturing** scenario, VERA's architecture is designed for **any document-heavy industry** — including aerospace, pharmaceuticals, automotive, energy, and more. It supports **two LLM backends**:
 
-- **Google Gemini** (cloud API) — higher quality, requires API key
+- **Google Gemini** (cloud API) — higher quality, complex synthesis
 - **Groq** (cloud API) — ultra-fast Llama-3.3 inference
-- **Ollama** (100% local) — no API key needed, runs on your laptop, no rate limits
+- **Ollama** (100% local) — no API key needed, runs on your laptop with full privacy. Optimized for Llama-3.2-1B for speed.
 
 ### Key Capabilities
 
 | Capability | Description |
 |-----------|-------------|
 | 🔒 **Role-Based Access Control** | Metadata-driven RBAC that filters document retrieval based on user clearance level |
-| 🛡️ **Information Lock** | Strictly constrains LLM to provided context; outputs "Data Not Found" instead of hallucinating |
-| 🏝️ **Domain Isolation** | Treats `user_domain` as immutable, preventing unauthorized domain bleed |
-| 📧 **Email Context Analysis** | Searches through ingested email threads to find informal engineering decisions |
-| ⚠️ **Discrepancy Detection** | Automatically identifies conflicts between datasheets, emails, DB records, and document versions |
-| 🚨 **Human Escalation** | Triggers supervisor review with detailed context summaries for unauthorized access attempts |
-| 🤖 **Multi-Agent Orchestration** | LangGraph-based workflow with specialized agents for different document types |
+| 🤖 **Agent Discussion** | Collaborative single-pass mechanism where Auditors critique Researchers to resolve contradictions |
+| 🕵️ **Context Shield (V3)** | Dual-layer filtering of both structured facts and raw document chunks to prevent irrelevant data leakage |
+| 🧪 **Cross-Industry Support** | Fully verified workflows for both **Semiconductor** (Manufacturing) and **Medical** (Healthcare) domains |
 | 🗄️ **Enterprise Data Logic** | Physically decoupled data sources (Structured SQL vs. Unstructured Vector) for production-grade reliability |
 
 ---
@@ -58,10 +55,11 @@ In many industries, **official specifications** (datasheets, manuals) often beco
 ```
 
 **VERA** bridges this gap by:
-1. Ingesting ALL document types (datasheets, emails, SOPs)
+1. Ingesting ALL document types (datasheets, emails, SOPs, clinical audits)
 2. Applying strict access controls so only authorized personnel see sensitive info
-3. Automatically detecting and reporting discrepancies between sources
-4. Escalating unauthorized access attempts to supervisors
+3. **Agent Discussion**: Auditor agents contrast "Gold Standard" documents against "Real-World" emails.
+4. Automatically detecting and reporting discrepancies between sources
+5. Escalating unauthorized access attempts or out-of-domain queries to supervisors
 
 ---
 
@@ -82,7 +80,8 @@ graph TD
     
     D --> F["🤖 Response Generator"]
     F --> G["🔍 Discrepancy Auditor"]
-    G -->|"Report Generated"| H["📤 Final Response"]
+    G -->|"Critique / Discussion Report"| F
+    F --> H["📤 Final Verified Response"]
     E -->|"Detailed Escalation Summary"| H
 
     subgraph "Domain-Isolated Clusters"
@@ -116,9 +115,10 @@ graph TD
 3. **Domain-Isolated Clusters** perform **Surgical Retrieval** based on decoupled data sources:
     *   **DB Agent Cluster** queries structured relational data (SQL).
     *   **Official/Informal Clusters** search unstructured document vector stores (RAG).
-4. **Generator** synthesizes a response constrained by the **Information Lock** (Information-Lock Protocol).
+4. **Generator** synthesizes a response constrained by the **Context Shield (V3)** and **Information Lock**.
 5. **Triangulation Discrepancy Engine** performs a cross-source audit between SQL facts and RAG context using a deterministic authority hierarchy (**DB > Official > Informal**).
-6. **Final response** delivered with citations or **Escalated** if security flags are tripped.
+6. **Agent Discussion**: If a high-confidence discrepancy is found, the Discrepancy Auditor provides a "Critique" that forces the Generator to reconcile the conflict in the final response.
+7. **Final response** delivered with citations or **Escalated** if security flags are tripped.
 
 ---
 

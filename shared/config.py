@@ -308,6 +308,7 @@ def retrieve_with_rbac(
     Retrieves documents from the vector store while enforcing strict RBAC
     and domain isolation.
     """
+    user_domain = user_domain.lower().strip() if user_domain else ""
     metadata_log = f"[RBAC] User role: {user_role} | Domain: {user_domain} | Query: '{query}'\n"
 
     # --- 1. Build RBAC filter ---

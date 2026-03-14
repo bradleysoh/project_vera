@@ -68,6 +68,7 @@ def _format_facts_as_list(facts: list[dict]) -> str:
 def run(state: GraphState) -> dict:
     question = state["question"]
     target_entity = state.get("target_entity", "GENERAL")
+    target_attribute = state.get("target_attribute", "GENERAL")
     documents = state.get("documents", [])
     official_facts = state.get("official_facts") or []
     informal_facts = state.get("informal_facts") or []
@@ -93,20 +94,40 @@ def run(state: GraphState) -> dict:
     display_db = db_facts
     display_db_data = db_data
 
+    # --- 核心修订 2: Strict Domain & Entity Filtering ---
+    user_domain = state.get("user_domain", "").lower().strip()
+    
+    def _domain_matches(f):
+        # Facts from DB agent or Doc agents should have 'domain' metadata
+        # If missing, assume it belongs to the current domain to avoid information loss
+        f_domain = str(f.get('domain', '')).lower().strip()
+        return not f_domain or f_domain == user_domain
+
+    display_official = [f for f in official_facts if _domain_matches(f)]
+    display_informal = [f for f in informal_facts if _domain_matches(f)]
+    display_db = [f for f in db_facts if _domain_matches(f)]
+    
+    # 🕵️ Debug: Log document domains before filtering
+    orig_doc_count = len(documents)
+    doc_domains = {str(d.metadata.get("domain", "NONE")).lower() for d in documents}
+    
+    # Filter documents by domain
+    documents = [d for d in documents if str(d.metadata.get("domain", "")).lower().strip() == user_domain]
+
+    # Entity Filter (only for specific queries)
     if not is_generic and target_entity != "GENERAL":
         target_lower = target_entity.lower().strip()
         variations = {target_lower, target_lower.replace("-", " "), target_lower.replace(" ", "-"), target_lower.replace(" ", "")}
         
-        def _matches(f):
+        def _entity_matches(f):
             e = f.get('entity', '').lower()
-            # STRICT FILTER: Only allow explicit entity matches or 'general' labels.
             return any(v in e for v in variations if len(v) > 2) or e in ("general", "unknown", "")
 
-        display_official = [f for f in official_facts if _matches(f)]
-        display_informal = [f for f in informal_facts if _matches(f)]
-        display_db = [f for f in db_facts if _matches(f)]
+        display_official = [f for f in display_official if _entity_matches(f)]
+        display_informal = [f for f in display_informal if _entity_matches(f)]
+        display_db = [f for f in display_db if _entity_matches(f)]
         
-        def _doc_matches(doc):
+        def _doc_entity_matches(doc):
             c = doc.page_content.lower()
             t = doc.metadata.get("title", "").lower()
             s = doc.metadata.get("source", "").lower()
@@ -114,7 +135,7 @@ def run(state: GraphState) -> dict:
             is_generic_doc = any(kw in s or kw in t for kw in ("sop", "policy", "handbook", "manual", "regulations"))
             return entity_match or is_generic_doc
 
-        documents = [d for d in documents if _doc_matches(d)]
+        documents = [d for d in documents if _doc_entity_matches(d)]
         
         # If DB data (blob) doesn't mention the entity, clear it from the generator's view
         has_orig_db = bool(db_data and db_data != NO_DATA_MARKER)
@@ -135,11 +156,14 @@ def run(state: GraphState) -> dict:
     if final_has_db: context_parts.append(f"### DATABASE RECORDS FOR '{target_entity}':\n{display_db_data[:1500]}")
     if display_official: context_parts.append(f"### OFFICIAL SPECIFICATIONS FOR '{target_entity}':\n{_format_facts_as_list(display_official)}")
     if display_informal: context_parts.append(f"### INTERNAL COMMUNICATIONS FOR '{target_entity}':\n{_format_facts_as_list(display_informal)}")
-    if documents and not (display_official or display_informal):
+    if documents:
         doc_snippet = "\n\n".join([f"[Source {i+1}] {doc.page_content[:800]}" for i, doc in enumerate(documents[:5])])
         context_parts.append(f"### MENTIONED IN PRIMARY DOCUMENTS (RELEVANT TO '{target_entity}'):\n{doc_snippet}")
 
-    context_text = "\n\n".join(context_parts)
+    debug_info = [
+        f"Verified {len(documents)} source documents for domain '{user_domain}'.",
+        f"Query context: {'Generic' if is_generic else f'Entity: {target_entity}'}."
+    ]
 
     # --- 核心修复 3: 注入绝对反致幻系统指令 (Anti-Hallucination Prompt) ---
     
@@ -196,6 +220,105 @@ def run(state: GraphState) -> dict:
         "question": question
     }).strip()
 
+    # --- Anti-Hallucination Validation (V2: Robust Stop-Words & Refined Regex) ---
+    import re
+    from shared.dynamic_loader import load_domain_configs
+    
+    # 1. identify capitalized words (potential entities)
+    potential_entities = set(re.findall(r'\b[A-Z][a-zA-Z0-9-]{1,}\b', raw_response))
+    
+    # 2. Define global "Safe words"
+    safe_words = {
+        "VERA", "Data", "Not", "Found", "Database", "Official", "Internal", "Sources", 
+        "Based", "The", "In", "On", "Of", "At", "By", "For", "With", "From", "And", "Or",
+        "Context", "Verified", "Information", "Records", "Review", "Summary", "Entity",
+        "According", "As", "To", "This", "That", "It", "Is", "Are", "Was", "Were",
+        "Project", "Management", "Required", "Note", "Conflict", "Discrepancy", "Target",
+        "Below", "Following", "I", "What", "When", "Who", "Where", "Does", "Do",
+        "Specifications", "Technical", "Details", "Status", "Category", "Product", "Material",
+        "Authoritative", "Primary", "Documents", "Relevant", "Additional", "Profile", "Records",
+        "Description", "Type", "Source", "Date", "Value", "Attributes", "Metrics", "Limits",
+        "Warning", "Alert", "Audit", "Report", "Detected", "Conflicts", "Aligned", "Difference",
+        "Electrical", "Transmission", "Infection", "Patient", "Clinic", "Hospital",
+        "Immediate", "Synthesis", "There", "Since", "Topic", "Topics", "Topics-Based", "Topic-Based",
+        "However", "Moreover", "Furthermore", "Additionally", "Consequently", "Therefore",
+        "Action", "Actions", "Protocol", "Protocols", "Steps", "Stage", "Level", "Phase",
+        "Health", "Medical", "Clinical", "Patient", "Patients", "Isolation", "Audit", "Summary",
+        "Reports", "Findings", "Observations", "Recommendations", "Cluster", "Clusters",
+        "TB", "Tuberculosis", "Epidemic", "Outbreak", "Prevention", "Control", "Immediate",
+        "Action", "Actions", "Protocol", "Protocols", "Policy", "Policies", "Bartowski", "Llama",
+        "Assistant", "Verified", "Information", "Context", "Sources", "Source", "According",
+        "States", "Mentioned", "Above", "Below", "Provided", "Found", "Details", "Relevant",
+        "QUESTION", "Name", "Names", "ALIGNMENT", "USER", "FACTS", "Life", "ANSWER", "Node",
+        "Here", "Ship", "Shipping", "Delivery", "Lead", "Time", "Program", "Programme"
+    }
+    
+    # Add target entity and attribute as safe words
+    safe_words.add(target_entity)
+    safe_words.add(target_attribute)
+    # Also add individual words from target entity
+    for w in target_entity.split():
+        if len(w) > 2: safe_words.add(w)
+
+    # 2b. Domain-Specific safe words
+    user_domain = state.get("user_domain", "")
+    if user_domain:
+        domain_configs = load_domain_configs()
+        cfg = domain_configs.get(user_domain, {})
+        for cat_kws in cfg.get("keywords", {}).values():
+            for kw in cat_kws:
+                if isinstance(kw, str):
+                    safe_words.update([kw.title(), kw.upper(), f"{kw.title()}s", f"{kw.upper()}S"])
+        for alias in cfg.get("aliases", []):
+            safe_words.update([alias.title(), alias.upper()])
+        safe_words.update(cfg.get("hallucination_safe_words", []))
+
+    # 4. Context entities
+    context_entities = set(re.findall(r'\b[A-Z][a-zA-Z0-9-]{1,}\b', context_text))
+    
+    # 5. Case-insensitive comparison (Leniency V3)
+    safe_words_upper = {sw.upper() for sw in safe_words}
+    context_entities_upper = {ce.upper() for ce in context_entities}
+    
+    # Add ALL alphanumeric words from context to the comparison pool (case-insensitive)
+    all_context_words = set(re.findall(r'\w+', context_text.upper()))
+    
+    hallucinated = []
+    for pe in potential_entities:
+        pe_upper = pe.upper()
+        # 1. Direct match in context or safe words
+        if pe_upper in context_entities_upper or pe_upper in safe_words_upper or pe_upper in all_context_words:
+            continue
+        # 2. Sub-string match (if pe is part of a longer context entity, or vice-versa)
+        if any(pe_upper in ce or ce in pe_upper for ce in context_entities_upper):
+            continue
+        # 3. Sub-string match for safe words (e.g. "Discrepancies" vs "Discrepancy")
+        if any(pe_upper.startswith(sw) or sw.startswith(pe_upper) for sw in safe_words_upper if len(sw) > 4):
+            continue
+        if target_entity.upper() in pe_upper or pe_upper in target_entity.upper():
+            continue
+        hallucinated.append(pe)
+    
+    if hallucinated:
+        debug_info.append(f"Hallucination detection: Found {len(hallucinated)} potential issues: {list(hallucinated)[:10]}")
+    else:
+        debug_info.append("Hallucination detection: Passed (0 issues found).")
+
+    # Final decision: If hallucinated, returned blocked message
+    if hallucinated and "Data Not Found" not in raw_response:
+        # Exclude very short words or purely numeric/symbolic from "truly risky"
+        truly_risky = [h for h in hallucinated if len(h) > 3 and any(c.isalpha() for c in h)] 
+        if truly_risky:
+            print(f"[Response Agent] 🚨 Hallucination detected: {truly_risky}. Forcing Data Not Found.")
+            main_res = _DATA_NOT_FOUND_MSG
+            # ADD the offending words to the thinking so the user/developer can see them in UI
+            debug_info.append(f"🔒 BLOCK REASON: Hallucinated terms: {truly_risky[:5]}")
+        else:
+            print(f"[Response Agent] 🛡️ Minor hallucination ignored: {hallucinated}")
+            main_res = raw_response
+    else:
+        main_res = raw_response
+
     # Split report and summary
     main_res = raw_response
     audit_summary = ""
@@ -235,5 +358,5 @@ def run(state: GraphState) -> dict:
     return {
         "generation": main_res,
         "discrepancy_report_summary": audit_summary,
-        "thought_process": [f"Synthesized from available context. Evaluated against entity '{target_entity}'."],
+        "thought_process": [f"Synthesized from available context. Evaluated against entity '{target_entity}'."] + debug_info,
     }

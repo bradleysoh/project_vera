@@ -23,10 +23,11 @@ proj_vera/
 │   │   ├── tech_spec_agent.py
 │   │   ├── compliance_agent.py
 │   │   └── discrepancy_agent.py
-│   └── medical_agents/                   # DOMAIN — auto-discovered
-│       ├── tech_spec_agent.py
-│       ├── compliance_agent.py
-│       └── discrepancy_agent.py
+│    └── medical_agents/                   # DOMAIN — Auto-discovered & Verified
+        ├── db_agent.py
+        ├── official_docs_agent.py
+        ├── informal_docs_agent.py
+        └── discrepancy_agent.py
 │
 ├── source_documents/                     # ✅ YOUR DATA GOES HERE
 │   ├── semiconductor/                    # Domain data
@@ -140,18 +141,15 @@ All agents MUST use the `@vera_agent` decorator and accept `GraphState`.
 ```python
 from shared.graph_state import GraphState
 from shared.agent_base import vera_agent
-from shared.advanced_rag import extract_structured_facts
 
 @vera_agent("Official Agent")
 def run(state: GraphState) -> dict:
-    # High-precision retrieval example
-    facts = extract_structured_facts(
-        state["question"],
-        entity=state["target_entity"],
-        attribute=state["target_attribute"],
-        source_filter=["datasheet"]
-    )
-    return {"extracted_facts": facts}
+    # 1. Custom logic here
+    # 2. Return standard fields + _thinking for UI telemetry
+    return {
+        "extracted_facts": [...],
+        "_thinking": "Internal agent logic step-by-step description for the UI."
+    }
 ```
 
 ### The 4 Required Agents per Domain:
@@ -165,9 +163,18 @@ def run(state: GraphState) -> dict:
 
 ---
 
-## 🔍 Triangulation Discrepancy Engine
+## 🔍 Agent Discussion & Triangulation Engine
 
-VERA uses a **deterministic authority hierarchy** to resolve conflicts between sources:
+### The "Discussion" Mechanism
+VERA uses a **collaborative multi-agent pipeline** to resolve conflicts. While a multi-turn recursion loop is technically supported, we use a **Single-Pass Agent Discussion** for local LLM performance:
+
+1.  **Researchers** (Official/Informal/DB) extract raw facts.
+2.  **The Auditor** (Discrepancy Agent) receives all facts and performs a deterministic audit.
+3.  **The Debate**: If a conflict is found, the Auditor generates a `critique` string.
+4.  **Reconciliation**: The **Response Agent** (Synthesizer) is injected with this `critique`. It is instructed to "reconcile" the agents' findings into a final verified response.
+
+### Deterministic Authority Hierarchy
+VERA uses a fixed hierarchy to resolve conflicts between sources:
 
 1. **Database Facts (Priority 3)**: Current production truth.
 2. **Official Documents (Priority 2)**: Specifications, SOPs, and Manuals.

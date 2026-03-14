@@ -17,11 +17,12 @@ DOMAIN_CONFIG = {
         ],
         "spec_retrieval": [
             "maintenance", "calibration", "device", "manual", "sop", "mri",
-            "ct scan", "x-ray", "calibration date", "safety check", "procedure"
+            "ct scan", "x-ray", "calibration date", "safety check", "procedure",
+            "isolation", "cluster", "tracing", "quarantine", "immediate", "protocol"
         ],
         "cross_reference": [
             "compare", "discrepancy", "mismatch", "conflict",
-            "cross-reference", "check against", "inconsistent",
+            "cross-reference", "check against", "inconsistent", "alignment"
         ],
     },
 

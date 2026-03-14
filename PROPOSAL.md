@@ -7,17 +7,22 @@
 ## 1. Executive Summary
 Project VERA (Virtual Engineering Review Agent) is a production-grade, multi-agent AI system designed to automate technical document auditing, cross-reference checking, and compliance verification. It addresses the critical challenge of documentation drift in regulated industries by autonomously auditing live database records against official specifications and informal engineering communications (emails, memos).
 
-The system features a **Surgical Router** for domain-isolated processing, an **Information Lock** protocol to eliminate hallucinations, and a deterministic **Triangulation Discrepancy Engine**. VERA supports local (Ollama) and cloud (Gemini, Groq) LLM backends, making it adaptable to diverse security and performance requirements.
+The system features a **Surgical Router** for domain-isolated processing, a **Context Shield (V3)** to eliminate hallucinations, and a collaborative **Agent Discussion** mechanism. VERA v3.0 is a production-ready solution verified for both Semiconductor and Medical domains.
 
 ---
 
 ## 2. Problem Statement
 In technical industries, the gap between official specifications and actual engineering practices causes significant risk. Decisions made via informal channels (emails, chat) often override official datasheets but are not captured in formal systems.
 
-**The "RTX-9000" Gap:**
+**The "RTX-9000" Gap (Manufacturing):**
 - 📄 **Datasheet**: "Max voltage = 5.0V"
 - 📧 **Internal Email**: "URGENT: Lowering to 3.3V due to heat failures"
-- ❌ **Outcome**: Engineers testing at 5.0V cause product failures, unaware of the undocumented change.
+- ❌ **Outcome**: Engineering misalignment leading to hardware damage.
+
+**The "TB Cluster" Gap (Healthcare):**
+- 📋 **Public SOP**: "Screening required within 14 days"
+- 📧 **Internal Alert**: "EMERGENCY: TB Cluster detected in Sector A; move screening to 7 days"
+- ❌ **Outcome**: Protocol drift leading to public health risks.
 
 ---
 
@@ -31,8 +36,7 @@ In technical industries, the gap between official specifications and actual engi
 ---
 
 ## 4. System Architecture
-
-VERA v2.5 utilizes a **Surgical Router** architecture that delegates tasks to domain-isolated agent clusters.
+VERA v3.0 utilizes a **Surgical Router** architecture that delegates tasks to domain-isolated agent clusters.
 
 ### Architecture Flow
 1. **Surgical Router**: Filters query by domain and intent (NER: Entity, Attribute, Access Level).
@@ -42,7 +46,8 @@ VERA v2.5 utilizes a **Surgical Router** architecture that delegates tasks to do
    - **Informal Agent**: Context research from emails/memos.
 3. **Triangulation Engine**: Cross-references all gathered facts using a deterministic authority hierarchy:
    - **DB Facts [3]** > **Official Docs [2]** > **Informal Comms [1]**.
-4. **Response Generator**: Compiles final report with citations or triggers **Human Escalation** if security flags are tripped.
+4. **Agent Discussion**: Auditor critique is injected into the generator's context for reconciled synthesis.
+5. **Response Generator**: Compiles final verified report with citations and **Audit Logs**.
 
 ---
 
