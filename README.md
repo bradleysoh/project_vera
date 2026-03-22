@@ -8,6 +8,7 @@
 [![Gemini](https://img.shields.io/badge/Google_Gemini-Cloud_LLM-red.svg)](https://ai.google.dev/)
 [![Groq](https://img.shields.io/badge/Groq-Cloud_Inference-blue.svg)](https://groq.com/)
 [![Ollama](https://img.shields.io/badge/Ollama-Local_LLM-purple.svg)](https://ollama.com/)
+[![Reducto](https://img.shields.io/badge/Reducto-Document_Parsing-yellow.svg)](https://reducto.ai/)
 
 ---
 
@@ -406,6 +407,7 @@ proj_vera/
 | **Google Gemini** | Cloud LLM + Embeddings (Option A) | Latest |
 | **Groq** | Cloud Inference (Option B) | Latest |
 | **Ollama** | Local LLM + Embeddings (Option C) | Latest |
+| **Reducto API** | Document parsing for complex PDFs/DOCX | Latest |
 | **Python** | Core runtime | 3.10+ |
 
 ---
