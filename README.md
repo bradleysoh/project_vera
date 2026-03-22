@@ -12,13 +12,11 @@
 
 ---
 
-## 📸 Screenshots
+## 🔗 Screenshot Links
 
-![Project VERA Interface](mkdir%20assets/Project%20VERA%20Interface.png)
-
-![Sample Semiconductor Response](mkdir%20assets/Sample%20Semiconductor%20Response.png)
-
-![Sample Pickleball Response](mkdir%20assets/Sample%20Pickleball%20Response.png)
+- [Project VERA Interface](mkdir%20assets/Project%20VERA%20Interface.png)
+- [Sample Semiconductor Response](mkdir%20assets/Sample%20Semiconductor%20Response.png)
+- [Sample Pickleball Response](mkdir%20assets/Sample%20Pickleball%20Response.png)
 
 ---
 ## 📋 Table of Contents
@@ -355,7 +353,7 @@ This runs 5 automated test scenarios demonstrating:
 
 ## Usage
 
-### Test Scenarios
+### Test Scenarios ([View Sample Discrepancy Reports](mkdir%20assets/Sample%20Discrepancy%20Report/))
 
 | Test | User Role | Query | Expected Behavior |
 |------|-----------|-------|-------------------|
